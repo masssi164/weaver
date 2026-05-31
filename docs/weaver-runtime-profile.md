@@ -35,6 +35,6 @@ The current implementation is a skeleton boundary for Sprint 13. The hooks are i
 
 `tools.deny` is a hard-deny in member mode. A member-supplied config cannot override it. Gateway, cron, `exec`, `write`, and `apply_patch` are default-deny for member runtimes unless the signed RuntimeProfile grants a narrow `tools.allow` exception. `bundle-mcp` is denied unless the signed profile explicitly sets `mcpPolicy.allowBundleMcp: true`.
 
-Policy decisions export support-safe audit metadata only: runtime profile hash/version, user/runtime id, action or tool, domain, optional backend `providerRef`, optional `CredentialRef`, decision, and reason. The export carries credential references, never raw provider secrets, OAuth refresh tokens, cookies, API keys, or provider-bearing URLs.
+Policy decisions export support-safe audit metadata only: runtime profile hash/version, user/runtime id, action or tool, domain, optional stable `channelId`, optional RuntimeProfile-approved `modelRef`, optional backend `providerRef`, optional `CredentialRef`, decision, and reason. The export carries credential references, never raw provider secrets, OAuth refresh tokens, cookies, API keys, or provider-bearing URLs.
 
 Operator/admin support remains possible through explicit `operatorSupport` profile metadata, but normal member UX must show the RuntimeProfile denial message instead of exposing raw OpenClaw configuration, setup wizards, or unsafe dashboard controls.
