@@ -219,17 +219,83 @@ describe("Weaver RuntimeProfile loader", () => {
 
   it("rejects provider-named channel projections before they can enter generated config", () => {
     const envelope = buildEnvelope();
-    const profileWithMatrixChannel = {
-      ...envelope,
-      profile: {
-        ...envelope.profile,
+    const providerChannelCases = [
+      {
+        label: "top-level Matrix channel",
         channels: {
           ...envelope.profile.channels,
           matrix: { homeserver: "https://matrix.example.org" },
         },
       },
-    };
+      {
+        label: "top-level Slack channel",
+        channels: {
+          ...envelope.profile.channels,
+          slack: { botTokenRef: { source: "runtime", id: "slack" } },
+        },
+      },
+      {
+        label: "provider-native config nested inside weave-chat",
+        channels: {
+          "weave-chat": {
+            ...envelope.profile.channels["weave-chat"],
+            matrix: { homeserver: "https://matrix.example.org" },
+          },
+        },
+      },
+      {
+        label: "raw provider endpoint nested inside weave-chat",
+        channels: {
+          "weave-chat": {
+            ...envelope.profile.channels["weave-chat"],
+            homeserver: "https://matrix.example.org",
+          },
+        },
+      },
+    ];
 
-    expect(() => loadSignedWeaverRuntimeProfile(profileWithMatrixChannel, { now })).toThrow();
+    for (const { label, channels } of providerChannelCases) {
+      expect(
+        () =>
+          loadSignedWeaverRuntimeProfile(
+            {
+              ...envelope,
+              profile: {
+                ...envelope.profile,
+                channels,
+              },
+            },
+            { now },
+          ),
+        label,
+      ).toThrow();
+    }
+  });
+
+  it("rejects raw provider credentials even when they are placed near allowed weave-chat credential refs", () => {
+    const envelope = buildEnvelope();
+
+    const profileWithRawProviderCredential = buildEnvelope({
+      channels: {
+        "weave-chat": {
+          ...envelope.profile.channels["weave-chat"],
+          runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
+        },
+      },
+      credentialRefs: {
+        "chat-token": { source: "runtime-token", id: "chat-token" },
+      },
+      mcp: [
+        {
+          id: "matrix-bridge",
+          credentialRef: "chat-token",
+          apiKey: "raw-provider-api-key",
+        },
+      ],
+    });
+
+    expect(() => loadSignedWeaverRuntimeProfile(profileWithRawProviderCredential, { now })).toThrow(
+      /Raw provider secret/,
+    );
   });
 });
