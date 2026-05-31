@@ -11,6 +11,27 @@ const RAW_SECRET_ALLOWED_KEYS = new Set([
   "secretRef",
 ]);
 const PROVIDER_CHANNEL_IDS = new Set(["matrix", "msteams", "slack", "imessage", "teams"]);
+const DEFAULT_MEMBER_DENIED_TOOLS = new Set(["gateway", "cron", "exec", "write", "apply_patch"]);
+const MEMBER_ALLOWED_CONTROLS = [
+  "style",
+  "memory",
+  "model-alias-selection",
+  "allowed-skills",
+  "workspace-preferences",
+  "personal-mcp-connections",
+] as const;
+const MEMBER_DENIED_RAW_SURFACES = [
+  "openclaw.json",
+  "raw-config-wizard",
+  "raw-dashboard",
+  "channels-admin",
+  "plugins-admin",
+  "mcp-admin",
+  "secrets-admin",
+  "sandbox-admin",
+  "tool-allowlists-admin",
+  "unsafe-dashboard-controls",
+] as const;
 
 const CredentialRefSchema = z
   .object({
@@ -73,6 +94,13 @@ const RuntimeProfileSchema = z
       })
       .strict(),
     mcp: z.array(z.record(z.string(), z.unknown())).default([]),
+    mcpPolicy: z
+      .object({
+        allowBundleMcp: z.boolean().default(false),
+        allowedPersonalConnections: z.array(z.string().min(1)).default([]),
+      })
+      .strict()
+      .default({ allowBundleMcp: false, allowedPersonalConnections: [] }),
     skills: z
       .object({
         allow: z.array(z.string()).default([]),
@@ -96,6 +124,13 @@ const RuntimeProfileSchema = z
       .strict()
       .default({ mode: "required" }),
     credentialRefs: z.record(z.string(), CredentialRefSchema).default({}),
+    operatorSupport: z
+      .object({
+        enabled: z.boolean().default(false),
+        reason: z.string().optional(),
+      })
+      .strict()
+      .default({ enabled: false }),
   })
   .strict();
 
@@ -132,9 +167,17 @@ export type GeneratedWeaverConfig = {
     };
   };
   mcp: Array<Record<string, unknown>>;
+  mcpPolicy: { allowBundleMcp: boolean; allowedPersonalConnections: string[] };
   skills: { allow: string[]; deny: string[] };
   tools: { allow: string[]; deny: string[] };
   sandbox: Record<string, unknown>;
+  memberMode: {
+    rawConfigLocked: true;
+    allowedControls: Array<(typeof MEMBER_ALLOWED_CONTROLS)[number]>;
+    deniedSurfaces: Array<(typeof MEMBER_DENIED_RAW_SURFACES)[number]>;
+    denialMessage: string;
+    operatorSupport: { enabled: boolean; reason?: string };
+  };
   audit: {
     mode: "required" | "disabled";
     runtimeProfileHash: string;
@@ -145,6 +188,21 @@ export type GeneratedWeaverConfig = {
     credentialRefs: string[];
     exportRef?: z.infer<typeof CredentialRefSchema>;
   };
+};
+
+export type RuntimeProfilePolicyDecision = "allow" | "deny";
+
+export type RuntimeProfileAuditDecision = {
+  runtimeProfileHash: string;
+  runtimeProfileVersion: number;
+  userRuntimeId: string;
+  userId: string;
+  toolOrAction: string;
+  domain: string;
+  providerRef?: string;
+  credentialRef?: z.infer<typeof CredentialRefSchema>;
+  decision: RuntimeProfilePolicyDecision;
+  reason: string;
 };
 
 export type RuntimeProfileLifecycleHooks = {
@@ -214,9 +272,21 @@ export function projectRuntimeProfileToConfig(
       },
     },
     mcp: profile.mcp.map((entry) => ({ ...entry })),
+    mcpPolicy: {
+      allowBundleMcp: profile.mcpPolicy.allowBundleMcp,
+      allowedPersonalConnections: [...profile.mcpPolicy.allowedPersonalConnections],
+    },
     skills: copyPolicy(profile.skills),
     tools: copyPolicy(profile.tools),
     sandbox: { ...profile.sandbox },
+    memberMode: {
+      rawConfigLocked: true,
+      allowedControls: [...MEMBER_ALLOWED_CONTROLS],
+      deniedSurfaces: [...MEMBER_DENIED_RAW_SURFACES],
+      denialMessage:
+        "This member runtime is governed by Weave. Raw OpenClaw configuration and unsafe operator controls require an explicit support/admin profile.",
+      operatorSupport: { ...profile.operatorSupport },
+    },
     audit: {
       mode: profile.audit.mode,
       runtimeProfileHash: profile.runtimeProfileHash,
@@ -230,6 +300,98 @@ export function projectRuntimeProfileToConfig(
   };
 }
 
+export function decideRuntimeProfileMemberSurfacePolicy(params: {
+  config: GeneratedWeaverConfig;
+  surface: string;
+}): RuntimeProfileAuditDecision {
+  const deniedSurface = params.config.memberMode.deniedSurfaces.includes(
+    params.surface as (typeof MEMBER_DENIED_RAW_SURFACES)[number],
+  );
+  const allowedControl = params.config.memberMode.allowedControls.includes(
+    params.surface as (typeof MEMBER_ALLOWED_CONTROLS)[number],
+  );
+  return buildAuditDecision({
+    config: params.config,
+    toolOrAction: params.surface,
+    decision: deniedSurface || !allowedControl ? "deny" : "allow",
+    reason: deniedSurface
+      ? params.config.memberMode.denialMessage
+      : allowedControl
+        ? "Weave-approved bounded member control"
+        : "member runtime denies unknown OpenClaw control surface",
+  });
+}
+
+export function decideRuntimeProfileToolPolicy(params: {
+  config: GeneratedWeaverConfig;
+  tool: string;
+  action?: string;
+  providerRef?: string;
+  credentialRef?: z.infer<typeof CredentialRefSchema>;
+}): RuntimeProfileAuditDecision {
+  const action = params.action ?? params.tool;
+  const hardDenied = params.config.tools.deny.includes(params.tool);
+  const memberDefaultDenied = DEFAULT_MEMBER_DENIED_TOOLS.has(params.tool);
+  const explicitlyAllowed = params.config.tools.allow.includes(params.tool);
+  const decision: RuntimeProfilePolicyDecision = hardDenied
+    ? "deny"
+    : memberDefaultDenied && !explicitlyAllowed
+      ? "deny"
+      : "allow";
+  const reason = hardDenied
+    ? "RuntimeProfile tools.deny hard-deny"
+    : memberDefaultDenied && !explicitlyAllowed
+      ? "member runtime default-deny for unsafe OpenClaw tool"
+      : explicitlyAllowed
+        ? "RuntimeProfile tools.allow exception"
+        : "not denied by RuntimeProfile";
+  return buildAuditDecision({
+    config: params.config,
+    toolOrAction: action,
+    providerRef: params.providerRef,
+    credentialRef: params.credentialRef,
+    decision,
+    reason,
+  });
+}
+
+export function decideRuntimeProfileMcpPolicy(params: {
+  config: GeneratedWeaverConfig;
+  action: string;
+  providerRef?: string;
+  credentialRef?: z.infer<typeof CredentialRefSchema>;
+}): RuntimeProfileAuditDecision {
+  const bundleMcpDenied =
+    params.action === "bundle-mcp" && params.config.mcpPolicy.allowBundleMcp !== true;
+  return buildAuditDecision({
+    config: params.config,
+    toolOrAction: params.action,
+    providerRef: params.providerRef,
+    credentialRef: params.credentialRef,
+    decision: bundleMcpDenied ? "deny" : "allow",
+    reason: bundleMcpDenied
+      ? "bundle-mcp requires an explicit RuntimeProfile mcpPolicy.allowBundleMcp grant"
+      : "allowed by RuntimeProfile MCP policy",
+  });
+}
+
+export function exportRuntimeProfileAuditDecision(
+  decision: RuntimeProfileAuditDecision,
+): RuntimeProfileAuditDecision {
+  return {
+    runtimeProfileHash: decision.runtimeProfileHash,
+    runtimeProfileVersion: decision.runtimeProfileVersion,
+    userRuntimeId: decision.userRuntimeId,
+    userId: decision.userId,
+    toolOrAction: decision.toolOrAction,
+    domain: decision.domain,
+    providerRef: decision.providerRef,
+    credentialRef: decision.credentialRef,
+    decision: decision.decision,
+    reason: decision.reason,
+  };
+}
+
 export function runtimeProfileHash(
   profile: Omit<WeaverRuntimeProfile, "runtimeProfileHash">,
 ): string {
@@ -238,6 +400,28 @@ export function runtimeProfileHash(
 
 export function runtimeProfileSigningPayload(profile: WeaverRuntimeProfile): Buffer {
   return Buffer.from(canonicalJson(profile));
+}
+
+function buildAuditDecision(params: {
+  config: GeneratedWeaverConfig;
+  toolOrAction: string;
+  providerRef?: string;
+  credentialRef?: z.infer<typeof CredentialRefSchema>;
+  decision: RuntimeProfilePolicyDecision;
+  reason: string;
+}): RuntimeProfileAuditDecision {
+  return {
+    runtimeProfileHash: params.config.runtimeProfileHash,
+    runtimeProfileVersion: params.config.runtimeProfileVersion,
+    userRuntimeId: params.config.channels["weave-chat"].userRuntimeId,
+    userId: params.config.audit.userId,
+    toolOrAction: params.toolOrAction,
+    domain: params.config.audit.domain,
+    providerRef: params.providerRef,
+    credentialRef: params.credentialRef,
+    decision: params.decision,
+    reason: params.reason,
+  };
 }
 
 function copyPolicy(policy: { allow: string[]; deny: string[] }) {
