@@ -1,8 +1,10 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  decideRuntimeProfileChannelPolicy,
   decideRuntimeProfileMcpPolicy,
   decideRuntimeProfileMemberSurfacePolicy,
+  decideRuntimeProfileModelPolicy,
   decideRuntimeProfileToolPolicy,
   exportRuntimeProfileAuditDecision,
   loadSignedWeaverRuntimeProfile,
@@ -183,6 +185,70 @@ describe("Weaver RuntimeProfile loader", () => {
     expect(
       decideRuntimeProfileMcpPolicy({ config: bundleAllowed, action: "bundle-mcp" }).decision,
     ).toBe("allow");
+  });
+
+  it("exports support-safe model and channel audit refs for Weaver decisions", () => {
+    const envelope = buildEnvelope();
+    const generated = loadSignedWeaverRuntimeProfile(envelope, {
+      now,
+      trustedPublicKeyPem: envelope.signature.publicKeyPem,
+    });
+
+    const channelDecision = decideRuntimeProfileChannelPolicy({
+      config: generated,
+      channelId: "weave-chat",
+      providerRef: "matrix:room-a",
+      credentialRef: { source: "runtime-token", id: "chat-token" },
+    });
+    expect(channelDecision).toMatchObject({
+      runtimeProfileHash: envelope.profile.runtimeProfileHash,
+      runtimeProfileVersion: 7,
+      userRuntimeId: "runtime-user-1",
+      userId: "user-1",
+      domain: "example.org",
+      channelId: "weave-chat",
+      providerRef: "matrix:room-a",
+      credentialRef: { source: "runtime-token", id: "chat-token" },
+      decision: "allow",
+    });
+
+    expect(
+      decideRuntimeProfileChannelPolicy({ config: generated, channelId: "matrix" }),
+    ).toMatchObject({
+      channelId: "matrix",
+      decision: "deny",
+      reason: expect.stringContaining("provider-native channel"),
+    });
+
+    const modelDecision = decideRuntimeProfileModelPolicy({
+      config: generated,
+      channelId: "weave-chat",
+      modelRef: "fast",
+      providerRef: "matrix:room-a",
+    });
+    expect(modelDecision).toMatchObject({
+      channelId: "weave-chat",
+      modelRef: "fast",
+      providerRef: "matrix:room-a",
+      decision: "allow",
+    });
+    expect(
+      decideRuntimeProfileModelPolicy({ config: generated, modelRef: "provider/raw-model" }),
+    ).toMatchObject({
+      modelRef: "provider/raw-model",
+      decision: "deny",
+      reason: expect.stringContaining("outside the RuntimeProfile model set"),
+    });
+
+    expect(JSON.stringify(exportRuntimeProfileAuditDecision(modelDecision))).toContain(
+      '"modelRef":"fast"',
+    );
+    expect(JSON.stringify(exportRuntimeProfileAuditDecision(channelDecision))).toContain(
+      '"channelId":"weave-chat"',
+    );
+    expect(JSON.stringify(exportRuntimeProfileAuditDecision(channelDecision))).not.toMatch(
+      /secret|token-value|refresh/i,
+    );
   });
 
   it("rejects unsigned, expired, revoked, tampered, or raw-secret-bearing profiles", () => {

@@ -199,6 +199,8 @@ export type RuntimeProfileAuditDecision = {
   userId: string;
   toolOrAction: string;
   domain: string;
+  channelId?: string;
+  modelRef?: string;
   providerRef?: string;
   credentialRef?: z.infer<typeof CredentialRefSchema>;
   decision: RuntimeProfilePolicyDecision;
@@ -355,6 +357,54 @@ export function decideRuntimeProfileToolPolicy(params: {
   });
 }
 
+export function decideRuntimeProfileChannelPolicy(params: {
+  config: GeneratedWeaverConfig;
+  channelId: string;
+  providerRef?: string;
+  credentialRef?: z.infer<typeof CredentialRefSchema>;
+}): RuntimeProfileAuditDecision {
+  const isStableWeaveChat = params.channelId === "weave-chat";
+  return buildAuditDecision({
+    config: params.config,
+    toolOrAction: `channel:${params.channelId}`,
+    channelId: params.channelId,
+    providerRef: params.providerRef,
+    credentialRef: params.credentialRef,
+    decision: isStableWeaveChat ? "allow" : "deny",
+    reason: isStableWeaveChat
+      ? "RuntimeProfile projects the stable weave-chat channel"
+      : "member runtime denies provider-native channel selection; route through weave-chat providerRefs",
+  });
+}
+
+export function decideRuntimeProfileModelPolicy(params: {
+  config: GeneratedWeaverConfig;
+  modelRef: string;
+  channelId?: string;
+  providerRef?: string;
+  credentialRef?: z.infer<typeof CredentialRefSchema>;
+}): RuntimeProfileAuditDecision {
+  const allowedModelRefs = new Set([
+    params.config.models.default,
+    ...Object.keys(params.config.models.aliases),
+    ...Object.values(params.config.models.aliases),
+    ...params.config.models.fallbacks,
+  ]);
+  const allowed = allowedModelRefs.has(params.modelRef);
+  return buildAuditDecision({
+    config: params.config,
+    toolOrAction: `model:${params.modelRef}`,
+    channelId: params.channelId,
+    modelRef: params.modelRef,
+    providerRef: params.providerRef,
+    credentialRef: params.credentialRef,
+    decision: allowed ? "allow" : "deny",
+    reason: allowed
+      ? "RuntimeProfile model alias/default/fallback allows this modelRef"
+      : "member runtime denies modelRef outside the RuntimeProfile model set",
+  });
+}
+
 export function decideRuntimeProfileMcpPolicy(params: {
   config: GeneratedWeaverConfig;
   action: string;
@@ -385,6 +435,8 @@ export function exportRuntimeProfileAuditDecision(
     userId: decision.userId,
     toolOrAction: decision.toolOrAction,
     domain: decision.domain,
+    channelId: decision.channelId,
+    modelRef: decision.modelRef,
     providerRef: decision.providerRef,
     credentialRef: decision.credentialRef,
     decision: decision.decision,
@@ -405,6 +457,8 @@ export function runtimeProfileSigningPayload(profile: WeaverRuntimeProfile): Buf
 function buildAuditDecision(params: {
   config: GeneratedWeaverConfig;
   toolOrAction: string;
+  channelId?: string;
+  modelRef?: string;
   providerRef?: string;
   credentialRef?: z.infer<typeof CredentialRefSchema>;
   decision: RuntimeProfilePolicyDecision;
@@ -417,6 +471,8 @@ function buildAuditDecision(params: {
     userId: params.config.audit.userId,
     toolOrAction: params.toolOrAction,
     domain: params.config.audit.domain,
+    channelId: params.channelId,
+    modelRef: params.modelRef,
     providerRef: params.providerRef,
     credentialRef: params.credentialRef,
     decision: params.decision,
