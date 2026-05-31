@@ -1,0 +1,75 @@
+{
+  "id": "weave-chat",
+  "activation": {
+    "onStartup": false
+  },
+  "channels": ["weave-chat"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "apiUrl": { "type": "string", "format": "uri" },
+      "runtimeProfileHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+      "runtimeProfileVersion": { "type": "integer", "minimum": 1 },
+      "userRuntimeId": { "type": "string", "minLength": 1 },
+      "runtimeTokenRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "id"],
+        "properties": {
+          "source": { "type": "string", "minLength": 1 },
+          "id": { "type": "string", "minLength": 1 }
+        }
+      },
+      "runtimeTokenCredentialRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "id"],
+        "properties": {
+          "source": { "type": "string", "minLength": 1 },
+          "id": { "type": "string", "minLength": 1 }
+        }
+      },
+      "webhookPath": { "type": "string", "pattern": "^/" },
+      "eventStreamPath": { "type": "string", "pattern": "^/" },
+      "defaultTo": { "type": "string" },
+      "accounts": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "apiUrl": { "type": "string", "format": "uri" },
+            "runtimeProfileHash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+            "runtimeProfileVersion": { "type": "integer", "minimum": 1 },
+            "userRuntimeId": { "type": "string", "minLength": 1 },
+            "runtimeTokenRef": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "id"],
+              "properties": {
+                "source": { "type": "string", "minLength": 1 },
+                "id": { "type": "string", "minLength": 1 }
+              }
+            },
+            "runtimeTokenCredentialRef": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "id"],
+              "properties": {
+                "source": { "type": "string", "minLength": 1 },
+                "id": { "type": "string", "minLength": 1 }
+              }
+            },
+            "webhookPath": { "type": "string", "pattern": "^/" },
+            "eventStreamPath": { "type": "string", "pattern": "^/" },
+            "defaultTo": { "type": "string" }
+          }
+        }
+      },
+      "defaultAccount": { "type": "string" }
+    }
+  }
+}

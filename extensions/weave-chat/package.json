@@ -1,0 +1,49 @@
+{
+  "name": "@openclaw/weave-chat",
+  "version": "2026.5.31",
+  "private": true,
+  "description": "Weaver Weave Chat channel plugin",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./api.js": "./api.ts",
+    "./runtime-api.js": "./runtime-api.ts"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "openclaw": "2026.5.28"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.31"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "weave-chat",
+      "label": "Weave Chat",
+      "selectionLabel": "Weave Chat",
+      "detailLabel": "Weave Chat Runtime",
+      "docsPath": "/channels/weave-chat",
+      "docsLabel": "weave-chat",
+      "blurb": "Weave-governed chat transport with provider routing hidden behind Weave.",
+      "systemImage": "bubble.left.and.bubble.right",
+      "markdownCapable": true,
+      "preferSessionLookupForAnnounceTarget": true,
+      "order": 20,
+      "commands": {
+        "nativeCommandsAutoEnabled": false,
+        "nativeSkillsAutoEnabled": false
+      }
+    }
+  }
+}
