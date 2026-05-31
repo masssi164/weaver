@@ -11,7 +11,7 @@ Weaver registers one member-mode chat channel: `weave-chat`.
 
 The channel is generated from a signed Weave `WeaverRuntimeProfile`. It talks to the Weave Chat runtime API with `runtimeProfileHash`, profile version, user runtime id, and a short-lived runtime-token `CredentialRef`. It does not configure Matrix, Teams, Slack, iMessage, or future provider transports directly in the member runtime.
 
-Provider routing stays in Weave. Provider identifiers may appear as backend-only `providerRefs` in audit metadata, but they are not projected into `channels.weave-chat` and are never rendered as provider-native channel config.
+Provider routing stays in Weave. Provider identifiers may appear as backend-only `providerRefs` in audit metadata, but they are not projected into `channels.weave-chat` and are never rendered as provider-native channel config. Raw provider secrets, tokens, cookies, provider-native URLs, setup wizards, and dashboard controls are not part of the generated member channel config.
 
 ## Generated config shape
 

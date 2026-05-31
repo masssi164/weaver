@@ -1,6 +1,10 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  decideRuntimeProfileMcpPolicy,
+  decideRuntimeProfileMemberSurfacePolicy,
+  decideRuntimeProfileToolPolicy,
+  exportRuntimeProfileAuditDecision,
   loadSignedWeaverRuntimeProfile,
   runtimeProfileHash,
   runtimeProfileSigningPayload,
@@ -35,6 +39,7 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
       },
     },
     mcp: [{ id: "calendar", credentialRef: "calendar-runtime" }],
+    mcpPolicy: { allowBundleMcp: false, allowedPersonalConnections: ["calendar"] },
     skills: { allow: ["calendar.read"], deny: [] },
     tools: { allow: ["message.send"], deny: ["exec", "write", "apply_patch"] },
     sandbox: { network: "weave-only" },
@@ -45,11 +50,12 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
     credentialRefs: {
       "calendar-runtime": { source: "runtime", id: "calendar" },
     },
+    operatorSupport: { enabled: false },
   };
+  const profileDraft = { ...hashable, ...overrides };
   const profile = {
-    ...hashable,
-    runtimeProfileHash: runtimeProfileHash(hashable),
-    ...overrides,
+    ...profileDraft,
+    runtimeProfileHash: overrides.runtimeProfileHash ?? runtimeProfileHash(profileDraft),
   };
   const signature = sign(null, runtimeProfileSigningPayload(profile), privateKey).toString(
     "base64",
@@ -92,6 +98,91 @@ describe("Weaver RuntimeProfile loader", () => {
     expect(generated.audit.providerRefs).toEqual(["matrix:room-a", "slack:channel-b"]);
     expect(generated.audit.credentialRefs).toEqual(["calendar-runtime"]);
     expect(generated.tools.deny).toEqual(["exec", "write", "apply_patch"]);
+    expect(generated.memberMode).toMatchObject({
+      rawConfigLocked: true,
+      allowedControls: [
+        "style",
+        "memory",
+        "model-alias-selection",
+        "allowed-skills",
+        "workspace-preferences",
+        "personal-mcp-connections",
+      ],
+      deniedSurfaces: expect.arrayContaining([
+        "openclaw.json",
+        "raw-config-wizard",
+        "raw-dashboard",
+        "secrets-admin",
+        "tool-allowlists-admin",
+      ]),
+    });
+  });
+
+  it("enforces member-mode tool and MCP policy with support-safe audit metadata", () => {
+    const envelope = buildEnvelope({
+      tools: { allow: ["write"], deny: ["exec"] },
+      mcpPolicy: { allowBundleMcp: false, allowedPersonalConnections: ["calendar"] },
+    });
+    const generated = loadSignedWeaverRuntimeProfile(envelope, {
+      now,
+      trustedPublicKeyPem: envelope.signature.publicKeyPem,
+    });
+
+    expect(
+      decideRuntimeProfileMemberSurfacePolicy({ config: generated, surface: "openclaw.json" }),
+    ).toMatchObject({
+      decision: "deny",
+      reason: expect.stringContaining("Raw OpenClaw configuration"),
+    });
+    expect(
+      decideRuntimeProfileMemberSurfacePolicy({ config: generated, surface: "style" }),
+    ).toMatchObject({
+      decision: "allow",
+      reason: "Weave-approved bounded member control",
+    });
+    expect(decideRuntimeProfileToolPolicy({ config: generated, tool: "exec" })).toMatchObject({
+      decision: "deny",
+      reason: "RuntimeProfile tools.deny hard-deny",
+    });
+    expect(decideRuntimeProfileToolPolicy({ config: generated, tool: "write" })).toMatchObject({
+      decision: "allow",
+      reason: "RuntimeProfile tools.allow exception",
+    });
+    expect(decideRuntimeProfileToolPolicy({ config: generated, tool: "gateway" })).toMatchObject({
+      decision: "deny",
+      reason: "member runtime default-deny for unsafe OpenClaw tool",
+    });
+    const mcpDecision = decideRuntimeProfileMcpPolicy({
+      config: generated,
+      action: "bundle-mcp",
+      providerRef: "matrix:room-a",
+      credentialRef: { source: "runtime", id: "calendar" },
+    });
+
+    expect(mcpDecision).toMatchObject({
+      runtimeProfileHash: envelope.profile.runtimeProfileHash,
+      runtimeProfileVersion: 7,
+      userRuntimeId: "runtime-user-1",
+      userId: "user-1",
+      toolOrAction: "bundle-mcp",
+      domain: "example.org",
+      providerRef: "matrix:room-a",
+      credentialRef: { source: "runtime", id: "calendar" },
+      decision: "deny",
+    });
+    expect(JSON.stringify(exportRuntimeProfileAuditDecision(mcpDecision))).not.toMatch(
+      /secret|token-value|refresh/i,
+    );
+
+    const bundleAllowed = loadSignedWeaverRuntimeProfile(
+      buildEnvelope({
+        mcpPolicy: { allowBundleMcp: true, allowedPersonalConnections: ["calendar"] },
+      }),
+      { now },
+    );
+    expect(
+      decideRuntimeProfileMcpPolicy({ config: bundleAllowed, action: "bundle-mcp" }).decision,
+    ).toBe("allow");
   });
 
   it("rejects unsigned, expired, revoked, tampered, or raw-secret-bearing profiles", () => {
