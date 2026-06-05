@@ -1074,7 +1074,7 @@
               },
               {
                 "group": "Advanced setup",
-                "pages": ["start/setup", "openclaw-agent-runtime"]
+                "pages": ["start/setup", "openclaw-agent-runtime", "governed-weaver-runtime"]
               }
             ]
           },

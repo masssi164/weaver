@@ -296,7 +296,7 @@ export function projectRuntimeProfileToConfig(
       userId: profile.user.id,
       domain: profile.user.domain,
       providerRefs: [...(weaveChat.providerRefs ?? [])],
-      credentialRefs: Object.keys(credentialRefs).sort(),
+      credentialRefs: Object.keys(credentialRefs).toSorted(),
       exportRef: profile.audit.exportRef,
     },
   };
@@ -411,8 +411,7 @@ export function decideRuntimeProfileMcpPolicy(params: {
   providerRef?: string;
   credentialRef?: z.infer<typeof CredentialRefSchema>;
 }): RuntimeProfileAuditDecision {
-  const bundleMcpDenied =
-    params.action === "bundle-mcp" && params.config.mcpPolicy.allowBundleMcp !== true;
+  const bundleMcpDenied = params.action === "bundle-mcp" && !params.config.mcpPolicy.allowBundleMcp;
   return buildAuditDecision({
     config: params.config,
     toolOrAction: params.action,
@@ -562,7 +561,7 @@ function sortForJson(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value)
         .filter(([, nested]) => nested !== undefined)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .toSorted(([left], [right]) => left.localeCompare(right))
         .map(([key, nested]) => [key, sortForJson(nested)]),
     );
   }

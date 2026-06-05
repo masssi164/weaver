@@ -4,7 +4,7 @@ import type { CoreConfig, ResolvedWeaveChatAccount, WeaveChatAccountConfig } fro
 export function listWeaveChatAccountIds(cfg: CoreConfig): string[] {
   const channel = cfg.channels?.["weave-chat"];
   const accountIds = Object.keys(channel?.accounts ?? {});
-  return accountIds.length === 0 ? [DEFAULT_WEAVE_CHAT_ACCOUNT_ID] : accountIds.sort();
+  return accountIds.length === 0 ? [DEFAULT_WEAVE_CHAT_ACCOUNT_ID] : accountIds.toSorted();
 }
 
 export function resolveDefaultWeaveChatAccountId(cfg: CoreConfig): string {

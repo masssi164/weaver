@@ -57,7 +57,7 @@ type ChatCompletionResponse = {
 };
 
 export function resolveWeaveChatRoundTripMode(
-  env: Pick<NodeJS.ProcessEnv, "WEAVER_WEAVE_CHAT_ROUNDTRIP_LIVE"> = process.env,
+  env: Partial<Record<"WEAVER_WEAVE_CHAT_ROUNDTRIP_LIVE", string | undefined>> = process.env,
 ): WeaveChatRoundTripMode {
   return TRUTHY_VALUES.has(env.WEAVER_WEAVE_CHAT_ROUNDTRIP_LIVE?.trim().toLowerCase() ?? "")
     ? "live"

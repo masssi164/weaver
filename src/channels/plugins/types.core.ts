@@ -261,6 +261,10 @@ export type ChannelAccountSnapshot = {
   webhookPath?: string;
   webhookUrl?: string;
   baseUrl?: string;
+  apiUrl?: string;
+  runtimeProfileHash?: string;
+  runtimeProfileVersion?: number;
+  userRuntimeId?: string;
   allowUnmentionedGroups?: boolean;
   cliPath?: string | null;
   dbPath?: string | null;
