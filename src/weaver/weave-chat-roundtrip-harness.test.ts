@@ -45,7 +45,7 @@ describe("Weaver weave-chat round-trip harness", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0] ?? [];
     expect(url).toBe("https://lmstudio.home.internal/v1/chat/completions");
-    expect(JSON.parse(String(init?.body))).toMatchObject({
+    expect(JSON.parse(init?.body as string)).toMatchObject({
       model: "qwen/qwen3.5-9b",
       stream: false,
     });

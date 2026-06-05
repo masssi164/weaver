@@ -18,7 +18,7 @@ const now = new Date("2026-05-31T12:00:00.000Z");
 
 function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWeaverRuntimeProfile {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const hashable = {
     kind: "WeaverRuntimeProfile" as const,
     profileVersion: 7,

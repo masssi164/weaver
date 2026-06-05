@@ -75,7 +75,7 @@ const message = defineChannelMessageAdapter({
           target: ctx.to,
           text: ctx.text,
           threadId: ctx.threadId == null ? undefined : String(ctx.threadId),
-          replyToId: ctx.replyToId == null ? undefined : String(ctx.replyToId),
+          replyToId: ctx.replyToId ?? undefined,
           runtimeProfileHash: account.runtimeProfileHash,
           runtimeProfileVersion: account.runtimeProfileVersion,
           userRuntimeId: account.userRuntimeId,
