@@ -1,0 +1,9 @@
+{
+  "corpus": "../weave-specs",
+  "canonicalPath": "/Users/flotterotter/code/weave-specs",
+  "lockedAt": "2026-06-12",
+  "requiredCorpusIds": [
+    "WEAVE-STEERING-SPEC-KIT-OPERATING-MODEL",
+    "WEAVE-MIGRATION-LEGACY-SPECS-20260612"
+  ]
+}

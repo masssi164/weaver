@@ -1,0 +1,7 @@
+corpus:
+  - WEAVE-STEERING-SPEC-KIT-OPERATING-MODEL
+repo_feature: specs/features/0006-audit-and-support-safe-evidence
+gates:
+  - pnpm test
+  - pnpm lint
+  - domain-first MCP taxonomy check
