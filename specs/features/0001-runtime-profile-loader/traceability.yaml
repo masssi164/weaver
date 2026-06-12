@@ -1,0 +1,7 @@
+corpus:
+  - WEAVE-STEERING-SPEC-KIT-OPERATING-MODEL
+repo_feature: specs/features/0001-runtime-profile-loader
+gates:
+  - pnpm test
+  - pnpm lint
+  - domain-first MCP taxonomy check

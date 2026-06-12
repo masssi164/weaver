@@ -1,0 +1,7 @@
+corpus:
+  - WEAVE-STEERING-SPEC-KIT-OPERATING-MODEL
+repo_feature: specs/features/0004-runtime-isolation-and-sandbox
+gates:
+  - pnpm test
+  - pnpm lint
+  - domain-first MCP taxonomy check

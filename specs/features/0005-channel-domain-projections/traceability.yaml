@@ -1,0 +1,7 @@
+corpus:
+  - WEAVE-STEERING-SPEC-KIT-OPERATING-MODEL
+repo_feature: specs/features/0005-channel-domain-projections
+gates:
+  - pnpm test
+  - pnpm lint
+  - domain-first MCP taxonomy check
