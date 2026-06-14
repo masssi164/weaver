@@ -109,7 +109,9 @@ describe("weave-chat channel seam", () => {
   });
 
   it("normalizes inbound Weave Chat events into a tenant-scoped session route without raw provider ids", () => {
-    const normalized = normalizeWeaveChatInboundMessage({ event: inboundFixture });
+    const normalized = normalizeWeaveChatInboundMessage({
+      event: inboundFixture,
+    });
 
     expect(normalized).toMatchObject({
       channelId: "weave-chat",
