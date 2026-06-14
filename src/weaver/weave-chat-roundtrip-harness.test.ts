@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createWeaveChatRoundTripPolicyConfig,
   DEFAULT_LMSTUDIO_CONTAINER_BASE_URL,
   normalizeLmStudioRequestModel,
   runWeaveChatRoundTripHarness,
 } from "./weave-chat-roundtrip-harness.js";
 
 describe("Weaver weave-chat round-trip harness", () => {
+  it("keeps the channel-only roundtrip fixture independent from MCP discovery", () => {
+    expect(createWeaveChatRoundTripPolicyConfig().mcp).toEqual({ servers: {} });
+  });
+
   it("produces deterministic offline evidence without provider-native channel config", async () => {
     const evidence = await runWeaveChatRoundTripHarness({ mode: "offline" });
 

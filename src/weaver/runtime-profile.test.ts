@@ -40,8 +40,23 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
         eventStreamPath: "/runtime/weave-chat/events",
       },
     },
-    mcp: [{ id: "calendar", credentialRef: "calendar-runtime" }],
-    mcpPolicy: { allowBundleMcp: false, allowedPersonalConnections: ["calendar"] },
+    mcp: {
+      servers: {
+        "weave-domain-tools": {
+          url: "https://weave.example.org/runtime/mcp",
+          transport: "streamable-http",
+          auth: "oauth",
+          oauth: {
+            scope: "runtime",
+            redirectUrl: "https://weave.example.org/runtime/mcp/oauth/callback",
+            clientMetadataUrl: "https://weave.example.org/runtime/mcp/oauth/client-metadata",
+          },
+          headers: { "x-weave-user-runtime-id": "runtime-user-1" },
+          toolFilter: { include: ["calendar.*"] },
+        },
+      },
+    },
+    mcpPolicy: { allowBundleMcp: false, allowedPersonalConnections: ["weave-domain-tools"] },
     skills: { allow: ["calendar.read"], deny: [] },
     tools: { allow: ["message.send"], deny: ["exec", "write", "apply_patch"] },
     sandbox: { network: "weave-only" },
@@ -98,6 +113,16 @@ describe("Weaver RuntimeProfile loader", () => {
     expect(JSON.stringify(generated.channels)).not.toContain("matrix");
     expect(JSON.stringify(generated.channels)).not.toContain("slack");
     expect(generated.audit.providerRefs).toEqual(["matrix:room-a", "slack:channel-b"]);
+    expect(generated.mcp).toMatchObject({
+      servers: {
+        "weave-domain-tools": {
+          url: "https://weave.example.org/runtime/mcp",
+          transport: "streamable-http",
+          auth: "oauth",
+          headers: { "x-weave-user-runtime-id": "runtime-user-1" },
+        },
+      },
+    });
     expect(generated.audit.credentialRefs).toEqual(["calendar-runtime"]);
     expect(generated.tools.deny).toEqual(["exec", "write", "apply_patch"]);
     expect(generated.memberMode).toMatchObject({
@@ -123,7 +148,7 @@ describe("Weaver RuntimeProfile loader", () => {
   it("enforces member-mode tool and MCP policy with support-safe audit metadata", () => {
     const envelope = buildEnvelope({
       tools: { allow: ["write"], deny: ["exec"] },
-      mcpPolicy: { allowBundleMcp: false, allowedPersonalConnections: ["calendar"] },
+      mcpPolicy: { allowBundleMcp: false, allowedPersonalConnections: ["weave-domain-tools"] },
     });
     const generated = loadSignedWeaverRuntimeProfile(envelope, {
       now,
@@ -178,7 +203,7 @@ describe("Weaver RuntimeProfile loader", () => {
 
     const bundleAllowed = loadSignedWeaverRuntimeProfile(
       buildEnvelope({
-        mcpPolicy: { allowBundleMcp: true, allowedPersonalConnections: ["calendar"] },
+        mcpPolicy: { allowBundleMcp: true, allowedPersonalConnections: ["weave-domain-tools"] },
       }),
       { now },
     );
@@ -276,7 +301,11 @@ describe("Weaver RuntimeProfile loader", () => {
     expect(() =>
       loadSignedWeaverRuntimeProfile(
         buildEnvelope({
-          mcp: [{ id: "bad", oauthRefreshToken: "raw-refresh-token" }],
+          mcp: {
+            servers: {
+              bad: { oauthRefreshToken: "raw-refresh-token" },
+            },
+          },
         }),
         { now },
       ),
@@ -351,17 +380,27 @@ describe("Weaver RuntimeProfile loader", () => {
       credentialRefs: {
         "chat-token": { source: "runtime-token", id: "chat-token" },
       },
-      mcp: [
-        {
-          id: "matrix-bridge",
-          credentialRef: "chat-token",
-          apiKey: "raw-provider-api-key",
+      mcp: {
+        servers: {
+          "matrix-bridge": {
+            credentialRef: "chat-token",
+            apiKey: "raw-provider-api-key",
+          },
         },
-      ],
+      },
     });
 
     expect(() => loadSignedWeaverRuntimeProfile(profileWithRawProviderCredential, { now })).toThrow(
       /Raw provider secret/,
     );
+  });
+
+  it("defaults channel-only RuntimeProfiles to an empty MCP server map", () => {
+    const generated = loadSignedWeaverRuntimeProfile(buildEnvelope({ mcp: { servers: {} } }), {
+      now,
+    });
+
+    expect(generated.channels["weave-chat"].apiUrl).toBe("https://weave.example.org");
+    expect(generated.mcp).toEqual({ servers: {}, sessionIdleTtlMs: undefined });
   });
 });

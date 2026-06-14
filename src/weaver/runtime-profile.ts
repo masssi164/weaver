@@ -59,6 +59,63 @@ const WeaveChatProfileSchema = z
   })
   .strict();
 
+const RuntimeProfileMcpServerSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    command: z.string().min(1).optional(),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+    cwd: z.string().min(1).optional(),
+    workingDirectory: z.string().min(1).optional(),
+    url: z.string().url().optional(),
+    transport: z.enum(["sse", "streamable-http"]).optional(),
+    headers: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+    connectionTimeoutMs: z.number().finite().positive().optional(),
+    connectTimeout: z.number().finite().positive().optional(),
+    requestTimeoutMs: z.number().finite().positive().optional(),
+    timeout: z.number().finite().positive().optional(),
+    supportsParallelToolCalls: z.boolean().optional(),
+    auth: z.literal("oauth").optional(),
+    oauth: z
+      .object({
+        scope: z.string().min(1).optional(),
+        redirectUrl: z.string().url().optional(),
+        clientMetadataUrl: z.string().url().optional(),
+      })
+      .strict()
+      .optional(),
+    sslVerify: z.boolean().optional(),
+    ssl_verify: z.boolean().optional(),
+    clientCert: z.string().min(1).optional(),
+    client_cert: z.string().min(1).optional(),
+    clientKey: z.string().min(1).optional(),
+    client_key: z.string().min(1).optional(),
+    toolFilter: z
+      .object({
+        include: z.array(z.string().min(1)).optional(),
+        exclude: z.array(z.string().min(1)).optional(),
+      })
+      .strict()
+      .optional(),
+    codex: z
+      .object({
+        agents: z.array(z.string().min(1)).optional(),
+        defaultToolsApprovalMode: z.enum(["auto", "prompt", "approve"]).optional(),
+        default_tools_approval_mode: z.enum(["auto", "prompt", "approve"]).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .catchall(z.unknown());
+
+const RuntimeProfileMcpSchema = z
+  .object({
+    servers: z.record(z.string(), RuntimeProfileMcpServerSchema).default({}),
+    sessionIdleTtlMs: z.number().finite().min(0).optional(),
+  })
+  .strict()
+  .default({ servers: {} });
+
 const RuntimeProfileSchema = z
   .object({
     kind: z.literal("WeaverRuntimeProfile"),
@@ -93,7 +150,7 @@ const RuntimeProfileSchema = z
         "weave-chat": WeaveChatProfileSchema,
       })
       .strict(),
-    mcp: z.array(z.record(z.string(), z.unknown())).default([]),
+    mcp: RuntimeProfileMcpSchema,
     mcpPolicy: z
       .object({
         allowBundleMcp: z.boolean().default(false),
@@ -166,7 +223,10 @@ export type GeneratedWeaverConfig = {
       eventStreamPath?: string;
     };
   };
-  mcp: Array<Record<string, unknown>>;
+  mcp: {
+    servers: Record<string, Record<string, unknown>>;
+    sessionIdleTtlMs?: number;
+  };
   mcpPolicy: { allowBundleMcp: boolean; allowedPersonalConnections: string[] };
   skills: { allow: string[]; deny: string[] };
   tools: { allow: string[]; deny: string[] };
@@ -273,7 +333,15 @@ export function projectRuntimeProfileToConfig(
         eventStreamPath: weaveChat.eventStreamPath,
       },
     },
-    mcp: profile.mcp.map((entry) => ({ ...entry })),
+    mcp: {
+      servers: Object.fromEntries(
+        Object.entries(profile.mcp.servers).map(([serverName, server]) => [
+          serverName,
+          { ...server },
+        ]),
+      ),
+      sessionIdleTtlMs: profile.mcp.sessionIdleTtlMs,
+    },
     mcpPolicy: {
       allowBundleMcp: profile.mcpPolicy.allowBundleMcp,
       allowedPersonalConnections: [...profile.mcpPolicy.allowedPersonalConnections],
