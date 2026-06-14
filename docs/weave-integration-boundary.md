@@ -1,14 +1,15 @@
 # Weave integration boundary
 
-This repository is the Weaver runtime repository. It is an OpenClaw-derived runtime that consumes Weave policy; it is not the Weave product suite and it is not the source of truth for Weave domains, providers, approvals, or audit semantics.
+This repository is the Weaver runtime repository. It is an OpenClaw-derived AI harness/runtime that consumes Weave policy; it is not the Weave product suite and it is not the source of truth for Weave domains, providers, approvals, or audit semantics.
 
 ## Weaver owns
 
 - RuntimeProfile loading and validation: signature, hash, profile version, expiry, revocation, rollback, and reload/restart decisions.
 - Rendering generated OpenClaw runtime config from the signed Weave `WeaverRuntimeProfile`.
 - Member-mode lockdown: raw OpenClaw setup, dashboard/config editing, plugin/channel/MCP/secret/tool allowlist editing, and unsafe local overrides are denied unless the signed profile grants a narrow operator support path.
-- The `weave-chat` channel plugin and its Weave Chat runtime API calls.
+- The `weave-chat` channel plugin and its Weave Chat runtime API calls to the Weave chat/API target.
 - Runtime-side enforcement that tool, MCP, model, channel, reload, revocation, and rollback decisions are audited with support-safe refs.
+- Runtime-side application of profile-scoped user customization and tool-use approval constraints; policy meaning and approval semantics still come from Weave.
 
 ## Weave owns
 
@@ -16,7 +17,8 @@ This repository is the Weaver runtime repository. It is an OpenClaw-derived runt
 - Provider/adapter selection, posture, caveats, migration/replacement paths, and readiness evidence.
 - MCP/domain-tool action semantics, risk, ApprovalReceipt policy, audit/evidence payload boundaries, and support-safe tool payload rules.
 - CredentialRef/SecretRef brokering and signed RuntimeProfile generation.
-- The Weave MCP/domain-tool server that Weaver calls.
+- The Weave MCP/domain-tool server that Weaver calls, starting with canonical-domain tools such as calendar and files.
+- Product/API target for the Weave chat channel.
 
 ## `weave-chat` placement
 
