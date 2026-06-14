@@ -2,7 +2,7 @@ import {
   buildChannelOutboundSessionRoute,
   createChatChannelPlugin,
 } from "openclaw/plugin-sdk/channel-core";
-import type { ChannelPlugin } from "openclaw/plugin-sdk/channel-core";
+import type { ChannelPlugin, PluginRuntime } from "openclaw/plugin-sdk/channel-core";
 import {
   createMessageReceiptFromOutboundResults,
   defineChannelMessageAdapter,
@@ -20,7 +20,9 @@ import {
 import { sendWeaveChatMessage } from "./client.js";
 import { weaveChatPluginConfigSchema } from "./config-schema.js";
 import { DEFAULT_WEAVE_CHAT_ACCOUNT_ID, WEAVE_CHAT_CHANNEL_ID } from "./constants.js";
+import { registerWeaveChatInboundRuntimeContext } from "./inbound.js";
 import type { CoreConfig, ResolvedWeaveChatAccount } from "./types.js";
+import { buildWeaveChatApprovalHintEvent } from "./weave-chat-contract.js";
 
 const meta = {
   ...getChatChannelMeta(WEAVE_CHAT_CHANNEL_ID),
@@ -49,6 +51,50 @@ const status = createComputedAccountStatusAdapter<ResolvedWeaveChatAccount>({
     },
   }),
 });
+
+function buildApprovalPayload(params: {
+  request: {
+    id?: string;
+    command?: string;
+    pluginName?: string;
+    toolName?: string;
+  };
+  kind: "exec" | "plugin" | "tool";
+  nowMs: number;
+}) {
+  const approvalId = String(params.request.id ?? "approval");
+  const target =
+    params.request.command ?? params.request.pluginName ?? params.request.toolName ?? params.kind;
+  const text = [
+    "Approval required",
+    `Action: ${params.kind}`,
+    `Target: ${target}`,
+    "Risk: this may take an action outside the current chat.",
+    "Options: approve, deny, or open details.",
+  ].join("\n");
+  const event = buildWeaveChatApprovalHintEvent({
+    sessionKey: `${WEAVE_CHAT_CHANNEL_ID}:approval:${approvalId}`,
+    approvalId,
+    correlationId: `${approvalId}:${params.nowMs}`,
+    turnId: approvalId,
+    text,
+    options: [
+      { id: "approve", label: "Approve" },
+      { id: "deny", label: "Deny" },
+      { id: "open", label: "Open details" },
+    ],
+  });
+  return {
+    text: event.text,
+    isStatusNotice: true,
+    channelData: {
+      weaveChat: {
+        eventType: "approval.prompt",
+        approval: event,
+      },
+    },
+  };
+}
 
 const message = defineChannelMessageAdapter({
   id: WEAVE_CHAT_CHANNEL_ID,
@@ -137,6 +183,18 @@ export const weaveChatPlugin: ChannelPlugin<ResolvedWeaveChatAccount> = createCh
         }),
     },
     status,
+    approvalCapability: {
+      render: {
+        exec: {
+          buildPendingPayload: ({ request, nowMs }) =>
+            buildApprovalPayload({ request, kind: "exec", nowMs }),
+        },
+        plugin: {
+          buildPendingPayload: ({ request, nowMs }) =>
+            buildApprovalPayload({ request, kind: "plugin", nowMs }),
+        },
+      },
+    },
     gateway: {
       startAccount: async (ctx) => {
         const account = ctx.account;
@@ -151,14 +209,24 @@ export const weaveChatPlugin: ChannelPlugin<ResolvedWeaveChatAccount> = createCh
           apiUrl: account.apiUrl,
           runtimeProfileHash: account.runtimeProfileHash,
         });
-        // The actual inbound adapter is the Weave webhook/event-stream boundary.
-        // It must dispatch only Weave Chat events; providerRef routing remains backend-only.
+        if (ctx.channelRuntime) {
+          registerWeaveChatInboundRuntimeContext({
+            cfg: ctx.cfg as CoreConfig,
+            account,
+            runtime: ctx.channelRuntime as PluginRuntime["channel"],
+            abortSignal: ctx.abortSignal,
+          });
+        }
+        // The actual HTTP webhook/event-stream route stays outside the ChannelPlugin SDK.
+        // Register the inbound runtime handler here so Weaver's outer boundary can resolve it.
         await new Promise<void>((resolve) => {
           if (ctx.abortSignal.aborted) {
             resolve();
             return;
           }
-          ctx.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+          ctx.abortSignal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
         });
         ctx.setStatus({ accountId: account.accountId, running: false });
       },

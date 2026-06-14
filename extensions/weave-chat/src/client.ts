@@ -17,6 +17,9 @@ export function buildWeaveChatSendBoundary(params: {
       "x-weave-runtime-profile-version": String(params.account.runtimeProfileVersion),
       "x-weave-user-runtime-id": params.account.userRuntimeId,
       "x-weave-runtime-token-ref": `${params.account.runtimeTokenRef.source}:${params.account.runtimeTokenRef.id}`,
+      ...(params.request.idempotencyKey
+        ? { "x-weave-idempotency-key": params.request.idempotencyKey }
+        : {}),
     },
     body: {
       target: params.request.target,
@@ -26,6 +29,8 @@ export function buildWeaveChatSendBoundary(params: {
       runtimeProfileHash: params.request.runtimeProfileHash,
       runtimeProfileVersion: params.request.runtimeProfileVersion,
       userRuntimeId: params.request.userRuntimeId,
+      idempotencyKey: params.request.idempotencyKey,
+      deliveryStatus: params.request.deliveryStatus ?? "pending",
     },
   };
 }

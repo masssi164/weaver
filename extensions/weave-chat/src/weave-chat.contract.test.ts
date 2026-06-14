@@ -5,6 +5,34 @@ import { resolveWeaveChatAccount } from "./accounts.js";
 import { buildWeaveChatSendBoundary } from "./client.js";
 import { weaveChatPluginConfigSchema } from "./config-schema.js";
 import { WEAVE_CHAT_CHANNEL_ID } from "./constants.js";
+import {
+  buildWeaveChatApprovalHintEvent,
+  buildWeaveChatFailureEvent,
+  buildWeaveChatSessionKey,
+  createInboundDeliveryGate,
+  normalizeWeaveChatInboundMessage,
+} from "./weave-chat-contract.js";
+
+const inboundFixture = {
+  kind: "message",
+  eventId: "evt_123",
+  messageId: "msg_123",
+  idempotencyKey: "idem_123",
+  deliveryCursor: "cursor_123",
+  sentAt: "2026-06-14T14:00:00.000Z",
+  runtimeProfileHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  runtimeProfileVersion: 3,
+  scope: {
+    tenantId: "tenant_alpha",
+    orgId: "org_1",
+    userId: "user_1",
+    conversationId: "conv_1",
+    spaceId: "space_1",
+    channelId: "channel_1",
+    threadId: "thread_1",
+  },
+  text: "hello from weave chat",
+} as const;
 
 describe("weave-chat channel seam", () => {
   it("declares the stable channel id in manifest and package metadata", () => {
@@ -80,6 +108,58 @@ describe("weave-chat channel seam", () => {
     expect(JSON.stringify(account)).not.toMatch(/providerRef|homeserver|slack|matrix|telegram/i);
   });
 
+  it("normalizes inbound Weave Chat events into a tenant-scoped session route without raw provider ids", () => {
+    const normalized = normalizeWeaveChatInboundMessage({
+      event: inboundFixture,
+    });
+
+    expect(normalized).toMatchObject({
+      channelId: "weave-chat",
+      accountId: "default",
+      sessionKey: "weave-chat:tenant:tenant_alpha:conversation:conv_1:thread:thread_1",
+      target: "tenant_alpha/conv_1",
+      threadId: "thread_1",
+      messageId: "msg_123",
+      userId: "user_1",
+      text: "hello from weave chat",
+    });
+    expect(normalized.observability).toMatchObject({
+      type: "channel_message_received",
+      tenantId: "tenant_alpha",
+      conversationId: "conv_1",
+      threadId: "thread_1",
+      messageId: "msg_123",
+    });
+    expect(JSON.stringify(normalized)).not.toMatch(/matrix|slack|telegram|providerRef|secret/i);
+  });
+
+  it("isolates tenants in session mapping even when conversation ids collide", () => {
+    const sameConversationOtherTenant = {
+      ...inboundFixture,
+      scope: { ...inboundFixture.scope, tenantId: "tenant_beta" },
+    };
+
+    expect(buildWeaveChatSessionKey(inboundFixture)).not.toBe(
+      buildWeaveChatSessionKey(sameConversationOtherTenant),
+    );
+  });
+
+  it("suppresses duplicate inbound deliveries so one tenant+message+idempotency key yields one visible effect", () => {
+    const gate = createInboundDeliveryGate();
+
+    const first = gate.markIfDuplicate(inboundFixture);
+    const second = gate.markIfDuplicate(inboundFixture);
+    const third = gate.markIfDuplicate({
+      ...inboundFixture,
+      scope: { ...inboundFixture.scope, tenantId: "tenant_beta" },
+    });
+
+    expect(first.duplicate).toBe(false);
+    expect(second.duplicate).toBe(true);
+    expect(second.observability.type).toBe("channel_duplicate_ignored");
+    expect(third.duplicate).toBe(false);
+  });
+
   it("builds outbound calls only against the Weave Chat runtime API boundary", () => {
     const account = resolveWeaveChatAccount({
       cfg: {
@@ -99,11 +179,13 @@ describe("weave-chat channel seam", () => {
     const boundary = buildWeaveChatSendBoundary({
       account,
       request: {
-        target: "provider-backed-room",
+        target: "tenant_alpha/conv_1",
         text: "hello",
         runtimeProfileHash: account.runtimeProfileHash,
         runtimeProfileVersion: account.runtimeProfileVersion,
         userRuntimeId: account.userRuntimeId,
+        idempotencyKey: "send-123",
+        deliveryStatus: "pending",
       },
     });
 
@@ -113,7 +195,86 @@ describe("weave-chat channel seam", () => {
       "x-weave-runtime-profile-version": "3",
       "x-weave-user-runtime-id": "runtime-user-1",
       "x-weave-runtime-token-ref": "runtime-token:chat-token",
+      "x-weave-idempotency-key": "send-123",
     });
-    expect(JSON.stringify(boundary)).not.toMatch(/matrix|slack|msteams|imessage/i);
+    expect(boundary.body).toMatchObject({
+      target: "tenant_alpha/conv_1",
+      text: "hello",
+      idempotencyKey: "send-123",
+      deliveryStatus: "pending",
+    });
+    expect(JSON.stringify(boundary)).not.toMatch(
+      /matrix|slack|msteams|imessage|chat\.send_message/i,
+    );
+  });
+
+  it("renders approval hints as accessible channel UX events", () => {
+    const approval = buildWeaveChatApprovalHintEvent({
+      sessionKey: "weave-chat:tenant:tenant_alpha:conversation:conv_1",
+      approvalId: "approval_123",
+      correlationId: "corr_123",
+      turnId: "turn_123",
+      text: "Approve running this tool?",
+      options: [
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+      ],
+    });
+
+    expect(approval).toMatchObject({
+      kind: "approval_hint",
+      status: "pending",
+      approvalId: "approval_123",
+      correlationId: "corr_123",
+      turnId: "turn_123",
+      accessibility: {
+        role: "group",
+        label: "Approval required",
+        description: "Approve running this tool?",
+      },
+    });
+    expect(approval.options).toEqual([
+      { id: "approve", label: "Approve", accessibilityLabel: "Approve" },
+      { id: "deny", label: "Deny", accessibilityLabel: "Deny" },
+    ]);
+  });
+
+  it("maps failure UX states to user-visible, audit-safe channel events", () => {
+    const codes = [
+      "weaver_offline",
+      "model_timeout",
+      "api_failure",
+      "profile_revoked",
+      "approval_denied",
+      "approval_expired",
+    ] as const;
+
+    for (const code of codes) {
+      const event = buildWeaveChatFailureEvent({
+        sessionKey: "weave-chat:tenant:tenant_alpha:conversation:conv_1",
+        correlationId: `corr-${code}`,
+        turnId: `turn-${code}`,
+        code,
+      });
+
+      expect(event).toMatchObject({
+        kind: "status",
+        status: "failed",
+        code,
+      });
+      expect(event.text.length).toBeGreaterThan(10);
+      expect(JSON.stringify(event)).not.toMatch(/token|secret|providerRef/i);
+    }
+  });
+
+  it("stays channel-only and does not introduce MCP server registration transport", async () => {
+    const pluginModule = await import("./channel.js");
+    const pluginText =
+      JSON.stringify(pluginManifest) + JSON.stringify(pluginModule.weaveChatPlugin);
+
+    expect(pluginText).toContain('"id":"weave-chat"');
+    expect(pluginText).not.toContain("chat.send_message");
+    expect(pluginText).not.toContain("registerTool");
+    expect(pluginText).not.toContain("mcpServer");
   });
 });

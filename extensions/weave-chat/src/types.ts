@@ -52,6 +52,8 @@ export type WeaveChatSendRequest = {
   runtimeProfileHash: string;
   runtimeProfileVersion: number;
   userRuntimeId: string;
+  idempotencyKey?: string;
+  deliveryStatus?: "pending" | "sent" | "failed";
 };
 
 export type WeaveChatSendResult = {
