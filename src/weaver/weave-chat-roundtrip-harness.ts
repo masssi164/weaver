@@ -105,7 +105,7 @@ export function createWeaveChatRoundTripPolicyConfig(): GeneratedWeaverConfig {
         eventStreamPath: "/runtime/weave-chat/events",
       },
     },
-    mcp: [],
+    mcp: { servers: {} },
     mcpPolicy: { allowBundleMcp: false, allowedPersonalConnections: [] },
     skills: { allow: [], deny: [] },
     tools: { allow: ["message.send"], deny: ["exec"] },
