@@ -3,6 +3,7 @@ import pluginManifest from "../openclaw.plugin.json" with { type: "json" };
 import packageJson from "../package.json" with { type: "json" };
 import { resolveWeaveChatAccount } from "./accounts.js";
 import { buildWeaveChatSendBoundary } from "./client.js";
+import { weaveChatPluginConfigSchema } from "./config-schema.js";
 import { WEAVE_CHAT_CHANNEL_ID } from "./constants.js";
 
 describe("weave-chat channel seam", () => {
@@ -23,6 +24,60 @@ describe("weave-chat channel seam", () => {
     expect(manifestText).not.toContain("slack");
     expect(manifestText).not.toContain("imessage");
     expect(manifestText).not.toContain("msteams");
+  });
+
+  it("rejects provider-native member runtime config through the runtime schema", () => {
+    const parsed = weaveChatPluginConfigSchema.runtime.safeParse({
+      apiUrl: "https://weave.example.org",
+      runtimeProfileHash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      runtimeProfileVersion: 3,
+      userRuntimeId: "runtime-user-1",
+      runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
+      providerRef: "matrix-prod",
+      homeserver: "https://matrix.example.org",
+      slackBotToken: "xoxb-forbidden",
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const issueText = JSON.stringify(parsed.issues);
+      expect(issueText).toContain("providerRef");
+      expect(issueText).toContain("homeserver");
+      expect(issueText).toContain("slackBotToken");
+    }
+  });
+
+  it("resolves only signed Weave runtime fields and CredentialRefs", () => {
+    const account = resolveWeaveChatAccount({
+      cfg: {
+        channels: {
+          "weave-chat": {
+            apiUrl: "https://weave.example.org",
+            runtimeProfileHash:
+              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            runtimeProfileVersion: 7,
+            userRuntimeId: "usr_runtime_123",
+            runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
+            webhookPath: "/runtime/weave-chat/webhook",
+            eventStreamPath: "/runtime/weave-chat/events",
+            defaultTo: "weave-room-1",
+          },
+        },
+      },
+    });
+
+    expect(account).toMatchObject({
+      accountId: "default",
+      configured: true,
+      apiUrl: "https://weave.example.org",
+      runtimeProfileVersion: 7,
+      userRuntimeId: "usr_runtime_123",
+      runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
+      webhookPath: "/runtime/weave-chat/webhook",
+      eventStreamPath: "/runtime/weave-chat/events",
+      defaultTo: "weave-room-1",
+    });
+    expect(JSON.stringify(account)).not.toMatch(/providerRef|homeserver|slack|matrix|telegram/i);
   });
 
   it("builds outbound calls only against the Weave Chat runtime API boundary", () => {
