@@ -110,8 +110,14 @@ describe("weave-chat inbound runtime seam", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
-  it("registers an inbound runtime context and dispatches exactly once", async () => {
+  it("registers an inbound runtime context, runs one turn, and returns the reply over Weave Chat", async () => {
     const { runtime, inbound, abort, task } = await startRegisteredRuntime();
+    vi.mocked(
+      runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher,
+    ).mockImplementationOnce(async ({ dispatcherOptions }) => {
+      await dispatcherOptions.deliver({ text: "hello back" }, { kind: "final" });
+      return { queuedFinal: true, counts: { tool: 0, block: 0, final: 1 } };
+    });
 
     await inbound.handleEvent(createEvent());
 
@@ -120,6 +126,17 @@ describe("weave-chat inbound runtime seam", () => {
     expect(call?.routeSessionKey).toBe(
       "weave-chat:tenant:tenant-a:conversation:conv-1:thread:thread-1",
     );
+    expect(hoisted.sendWeaveChatMessage).toHaveBeenCalledTimes(1);
+    expect(hoisted.sendWeaveChatMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({
+          target: "tenant-a/conv-1",
+          text: "hello back",
+          threadId: "thread-1",
+          replyToId: "msg-1",
+        }),
+      }),
+    );
 
     abort.abort();
     await task;
@@ -127,11 +144,18 @@ describe("weave-chat inbound runtime seam", () => {
 
   it("drops duplicate inbound events through the registered runtime seam", async () => {
     const { runtime, inbound, abort, task } = await startRegisteredRuntime();
+    vi.mocked(runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher).mockImplementation(
+      async ({ dispatcherOptions }) => {
+        await dispatcherOptions.deliver({ text: "hello back" }, { kind: "final" });
+        return { queuedFinal: true, counts: { tool: 0, block: 0, final: 1 } };
+      },
+    );
 
     await inbound.handleEvent(createEvent());
     await inbound.handleEvent(createEvent());
 
     expect(runtime.channel.inbound.dispatchReply).toHaveBeenCalledTimes(1);
+    expect(hoisted.sendWeaveChatMessage).toHaveBeenCalledTimes(1);
 
     abort.abort();
     await task;
@@ -193,29 +217,38 @@ describe("weave-chat inbound runtime seam", () => {
     await task;
   });
 
-  it("sends a support-safe failure event when inbound dispatch fails", async () => {
-    const { runtime, inbound, abort, task } = await startRegisteredRuntime();
-    vi.mocked(runtime.channel.inbound.dispatchReply).mockRejectedValueOnce(
-      new Error("model timeout"),
-    );
+  it.each([
+    ["model timeout", "model_timeout", "The model took too long to respond. Please try again."],
+    ["runtime unavailable", "weaver_offline", "Weaver is offline right now. Please retry shortly."],
+    [
+      "profile invalid for runtime",
+      "profile_revoked",
+      "This runtime profile is no longer valid. Reconnect Weaver to continue.",
+    ],
+  ] as const)(
+    "sends a support-safe failure event when inbound dispatch fails: %s",
+    async (message, code, text) => {
+      const { runtime, inbound, abort, task } = await startRegisteredRuntime();
+      vi.mocked(runtime.channel.inbound.dispatchReply).mockRejectedValueOnce(new Error(message));
 
-    await expect(inbound.handleEvent(createEvent())).rejects.toThrow("model timeout");
+      await expect(inbound.handleEvent(createEvent())).rejects.toThrow(message);
 
-    expect(hoisted.sendWeaveChatMessage).toHaveBeenCalledTimes(1);
-    expect(hoisted.sendWeaveChatMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        request: expect.objectContaining({
-          target: "tenant-a/conv-1",
-          text: "The model took too long to respond. Please try again.",
-          idempotencyKey: expect.stringContaining(":failure:model_timeout"),
-          deliveryStatus: "failed",
+      expect(hoisted.sendWeaveChatMessage).toHaveBeenCalledTimes(1);
+      expect(hoisted.sendWeaveChatMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            target: "tenant-a/conv-1",
+            text,
+            idempotencyKey: expect.stringContaining(`:failure:${code}`),
+            deliveryStatus: "failed",
+          }),
         }),
-      }),
-    );
+      );
 
-    abort.abort();
-    await task;
-  });
+      abort.abort();
+      await task;
+    },
+  );
 
   it("exposes approval prompt rendering through the channel approval hook", () => {
     const payload = weaveChatPlugin.approvalCapability?.render?.exec?.buildPendingPayload?.({

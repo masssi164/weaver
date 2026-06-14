@@ -25,7 +25,13 @@ function classifyDispatchFailure(error: unknown): WeaveChatFailureCode {
   if (text.includes("timeout") || text.includes("timed out")) {
     return "model_timeout";
   }
-  if (text.includes("profile") && (text.includes("revoked") || text.includes("expired"))) {
+  if (text.includes("offline") || text.includes("unavailable") || text.includes("not available")) {
+    return "weaver_offline";
+  }
+  if (
+    text.includes("profile") &&
+    (text.includes("revoked") || text.includes("expired") || text.includes("invalid"))
+  ) {
     return "profile_revoked";
   }
   return "api_failure";
