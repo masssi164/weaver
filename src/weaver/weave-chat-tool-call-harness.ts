@@ -3,7 +3,6 @@ import { createBundleMcpJsonSchemaValidator } from "../agents/agent-bundle-mcp-r
 import type { McpCatalogTool, SessionMcpRuntime } from "../agents/agent-bundle-mcp-types.js";
 import { sanitizeAssistantVisibleText } from "../shared/text/assistant-visible-text.js";
 import {
-  discoverGeneratedWeaverMcpTools,
   WEAVE_DOMAIN_TOOLS_SERVER_NAME,
   type RuntimeProfileMcpDiscoveryOptions,
 } from "./runtime-profile-mcp-discovery.js";
@@ -108,9 +107,10 @@ export async function runWeaveChatToolCallHarness(
     throw new Error(modelDecision.reason);
   }
 
-  const discovery = await discoverGeneratedWeaverMcpTools(config, options);
-  if (discovery.supportSafeStatus !== "discovered") {
-    throw new Error(discovery.diagnostics[0] ?? discovery.supportSafeStatus);
+  if (!config.mcp.servers[WEAVE_DOMAIN_TOOLS_SERVER_NAME]) {
+    throw new Error(
+      `${WEAVE_DOMAIN_TOOLS_SERVER_NAME} is not enabled in RuntimeProfile MCP config.`,
+    );
   }
 
   const runtime = await (options.getSessionMcpRuntime ?? importRuntime())({
@@ -205,7 +205,7 @@ export async function runWeaveChatToolCallHarness(
         channelId: "weave-chat",
         modelRef: options.modelRef,
         requestModel,
-        discoveryStatus: discovery.supportSafeStatus,
+        discoveryStatus: "discovered",
         toolInventory: toolEntries.map((entry) => ({
           openAiName: entry.openAiName,
           serverName: entry.tool.serverName,
