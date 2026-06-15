@@ -20,6 +20,7 @@ const SUPPRESSED_VITEST_STDERR_PATTERNS = ["[PLUGIN_TIMINGS]"];
 export const DEFAULT_VITEST_NO_OUTPUT_TIMEOUT_MS = 120_000;
 export const DEFAULT_VITEST_NO_OUTPUT_HEARTBEAT_MS = 60_000;
 export const DEFAULT_LONG_RUNNING_VITEST_NO_OUTPUT_TIMEOUT_MS = 300_000;
+export const DEFAULT_LIVE_VITEST_NO_OUTPUT_TIMEOUT_MS = 420_000;
 const VITEST_NO_OUTPUT_TIMEOUT_ENV_KEY = "OPENCLAW_VITEST_NO_OUTPUT_TIMEOUT_MS";
 const VITEST_NO_OUTPUT_HEARTBEAT_ENV_KEY = "OPENCLAW_VITEST_NO_OUTPUT_HEARTBEAT_MS";
 const UI_VITEST_CONFIG = "test/vitest/vitest.ui.config.ts";
@@ -27,6 +28,7 @@ const UNIT_UI_VITEST_CONFIG = "test/vitest/vitest.unit-ui.config.ts";
 const TOOLING_VITEST_CONFIG = "test/vitest/vitest.tooling.config.ts";
 const LONG_RUNNING_VITEST_CONFIGS = new Set([
   "test/vitest/vitest.e2e.config.ts",
+  "test/vitest/vitest.live.config.ts",
   "test/vitest/vitest.ui-e2e.config.ts",
 ]);
 const TOOLING_EXCLUDED_TESTS = new Set([
@@ -243,9 +245,7 @@ export function resolveRunVitestSpawnEnv(env = process.env, argv = []) {
   const hasHeartbeat = Object.hasOwn(env, VITEST_NO_OUTPUT_HEARTBEAT_ENV_KEY);
   return {
     ...env,
-    ...(!hasTimeout
-      ? { [VITEST_NO_OUTPUT_TIMEOUT_ENV_KEY]: String(defaultTimeoutMs) }
-      : {}),
+    ...(!hasTimeout ? { [VITEST_NO_OUTPUT_TIMEOUT_ENV_KEY]: String(defaultTimeoutMs) } : {}),
     ...(!hasHeartbeat && timeoutMs !== null && DEFAULT_VITEST_NO_OUTPUT_HEARTBEAT_MS < timeoutMs
       ? { [VITEST_NO_OUTPUT_HEARTBEAT_ENV_KEY]: String(DEFAULT_VITEST_NO_OUTPUT_HEARTBEAT_MS) }
       : {}),
@@ -254,8 +254,14 @@ export function resolveRunVitestSpawnEnv(env = process.env, argv = []) {
 
 export function resolveDefaultVitestNoOutputTimeoutMs(argv = []) {
   const config = resolveVitestConfigArg(argv);
+  if (config !== null && isLiveVitestConfig(config)) {
+    return DEFAULT_LIVE_VITEST_NO_OUTPUT_TIMEOUT_MS;
+  }
   if (config !== null && isLongRunningVitestConfig(config)) {
     return DEFAULT_LONG_RUNNING_VITEST_NO_OUTPUT_TIMEOUT_MS;
+  }
+  if (hasExplicitLiveTestFileArg(argv)) {
+    return DEFAULT_LIVE_VITEST_NO_OUTPUT_TIMEOUT_MS;
   }
   return DEFAULT_VITEST_NO_OUTPUT_TIMEOUT_MS;
 }
@@ -277,13 +283,25 @@ function resolveVitestConfigArg(argv) {
 }
 
 function isLongRunningVitestConfig(config) {
-  const normalized = path.normalize(config).replaceAll(path.sep, "/").replace(/^\.\//u, "");
+  const normalized = normalizeVitestConfigPath(config);
   for (const candidate of LONG_RUNNING_VITEST_CONFIGS) {
     if (normalized === candidate || normalized.endsWith(`/${candidate}`)) {
       return true;
     }
   }
   return false;
+}
+
+function isLiveVitestConfig(config) {
+  const normalized = normalizeVitestConfigPath(config);
+  return (
+    normalized === "test/vitest/vitest.live.config.ts" ||
+    normalized.endsWith("/test/vitest/vitest.live.config.ts")
+  );
+}
+
+function normalizeVitestConfigPath(config) {
+  return path.normalize(config).replaceAll(path.sep, "/").replace(/^\.\//u, "");
 }
 
 export function resolveVitestSpawnParams(env = process.env, platform = process.platform) {
@@ -379,6 +397,12 @@ function collectExplicitTestFileArgs(argv) {
     }
   }
   return files;
+}
+
+function hasExplicitLiveTestFileArg(argv) {
+  return collectExplicitTestFileArgs(argv).some((file) =>
+    /\.live\.test\.[cm]?[jt]sx?$/u.test(file),
+  );
 }
 
 export function resolveExplicitTestFileNoPassArgs(argv) {
