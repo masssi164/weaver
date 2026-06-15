@@ -1,7 +1,3 @@
-import { randomUUID } from "node:crypto";
-import http from "node:http";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { describe, expect, it } from "vitest";
 import { isLiveTestEnabled } from "../agents/live-test-helpers.js";
 import type { GeneratedWeaverConfig } from "./runtime-profile.js";
@@ -15,59 +11,22 @@ const LMSTUDIO_BASE_URL =
 const MODEL_REF = process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MODEL ?? "lmstudio/qwen/qwen3.5-9b";
 const MCP_URL = process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_URL;
 
-async function startLocalWeaveDomainToolsServer(): Promise<{
-  url: string;
-  close: () => Promise<void>;
-}> {
-  const mcpServer = new McpServer({ name: "weave-domain-tools-live-probe", version: "1.0.0" });
-  mcpServer.tool("calendar.search_events", "Search read-only calendar events", async () => ({
-    structuredContent: {
-      items: [
-        {
-          startsAt: "2026-06-16T09:00:00+02:00",
-          titlePresent: true,
-          supportSafeSummary: "A calendar event exists tomorrow morning.",
-        },
-      ],
-    },
-    content: [
-      { type: "text", text: "Morgen gibt es einen support-sicheren Kalendereintrag am Vormittag." },
-    ],
-  }));
-  mcpServer.tool("files.search", "Search read-only file metadata", async () => ({
-    structuredContent: { items: [] },
-    content: [{ type: "text", text: "Keine passenden Dateien gefunden." }],
-  }));
-
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID });
-  await mcpServer.connect(transport);
-  const httpServer = http.createServer(async (req, res) => {
-    if (!req.url?.startsWith("/mcp")) {
-      res.writeHead(404).end();
-      return;
-    }
-    try {
-      await transport.handleRequest(req, res);
-    } catch (error) {
-      console.warn(`Weave domain tools live probe failed to handle MCP request: ${String(error)}`);
-      if (!res.headersSent) {
-        res.writeHead(500).end();
-      } else {
-        res.end();
-      }
-    }
-  });
-  await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
-  const address = httpServer.address();
-  const port = typeof address === "object" && address ? address.port : 0;
+function createWeaveMcpHeaders(): Record<string, string> {
+  const projection = process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_RUNTIME_PROFILE_PROJECTION;
   return {
-    url: `http://127.0.0.1:${port}/mcp`,
-    close: async () => {
-      await transport.close().catch(() => undefined);
-      await new Promise<void>((resolve, reject) =>
-        httpServer.close((error) => (error ? reject(error) : resolve())),
-      );
-    },
+    ...(process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_AUTHORIZATION
+      ? { Authorization: process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_AUTHORIZATION }
+      : {}),
+    ...(process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_ORG_ID
+      ? { "X-Weave-Org-Id": process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_ORG_ID }
+      : {}),
+    ...(process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_USER_REF
+      ? { "X-Weave-User-Ref": process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_USER_REF }
+      : {}),
+    ...(process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_RUNTIME_PROFILE
+      ? { "X-Weave-Runtime-Profile": process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_RUNTIME_PROFILE }
+      : {}),
+    ...(projection ? { "X-Weave-Runtime-Profile-Projection": projection } : {}),
   };
 }
 
@@ -99,6 +58,7 @@ function createGeneratedConfig(mcpUrl: string): GeneratedWeaverConfig {
           transport: "streamable-http",
           url: mcpUrl,
           requestTimeoutMs: LIVE_TIMEOUT_MS,
+          headers: createWeaveMcpHeaders(),
         },
       },
     },
@@ -107,7 +67,7 @@ function createGeneratedConfig(mcpUrl: string): GeneratedWeaverConfig {
     tools: {
       allow: [
         "mcp:weave-domain-tools:calendar.search_events",
-        "mcp:weave-domain-tools:files.search",
+        "mcp:weave-domain-tools:calendar.read",
       ],
       deny: ["exec", "write", "apply_patch"],
     },
@@ -140,31 +100,46 @@ function createGeneratedConfig(mcpUrl: string): GeneratedWeaverConfig {
 
 describeLive("weave chat tool-call harness (live)", () => {
   it(
-    "executes a same-turn LM Studio/Qwen tool call through Weave MCP and returns a final answer",
+    "executes a same-turn LM Studio/Qwen calendar-read tool call through the real Weave MCP server",
     async () => {
-      const probeServer = MCP_URL ? undefined : await startLocalWeaveDomainToolsServer();
-      try {
-        const evidence = await runWeaveChatToolCallHarness(
-          createGeneratedConfig(MCP_URL ?? probeServer!.url),
-          {
-            baseUrl: LMSTUDIO_BASE_URL,
-            modelRef: MODEL_REF,
-            prompt:
-              "Nutze ein verfügbares read-only Weave-Werkzeug für Kalendertermine und antworte danach knapp auf Deutsch: Welche support-sicheren Informationen kannst du zu morgigen Kalenderterminen finden?",
-            timeoutMs: LIVE_TIMEOUT_MS,
-          },
+      if (!MCP_URL) {
+        throw new Error(
+          "OPENCLAW_LIVE_QWEN_TOOLCALL_MCP_URL must point at a real weave-domain-tools server; the live gate must not fall back to an in-process fixture.",
         );
-
-        expect(evidence.channelId).toBe("weave-chat");
-        expect(evidence.requestModel.length).toBeGreaterThan(0);
-        expect(evidence.toolInventory.length).toBeGreaterThan(0);
-        expect(evidence.rounds.some((round) => round.kind === "model_tool_request")).toBe(true);
-        expect(evidence.rounds.some((round) => round.kind === "tool_result")).toBe(true);
-        expect(evidence.rounds.at(-1)).toMatchObject({ kind: "final_answer" });
-        expect(evidence.finalText.trim().length).toBeGreaterThan(0);
-      } finally {
-        await probeServer?.close();
       }
+      const evidence = await runWeaveChatToolCallHarness(createGeneratedConfig(MCP_URL), {
+        baseUrl: LMSTUDIO_BASE_URL,
+        modelRef: MODEL_REF,
+        prompt:
+          "Nutze ausschließlich ein read-only Weave-Kalenderwerkzeug und antworte danach knapp support-sicher auf Deutsch: Welche Ereignisse gibt es heute im Kalender?",
+        timeoutMs: LIVE_TIMEOUT_MS,
+      });
+
+      expect(evidence.channelId).toBe("weave-chat");
+      expect(evidence.requestModel.length).toBeGreaterThan(0);
+      expect(evidence.toolInventory.map((tool) => tool.toolName)).toEqual(
+        expect.arrayContaining([expect.stringMatching(/^calendar\.(search_events|read)$/)]),
+      );
+      expect(evidence.toolInventory.some((tool) => tool.toolName === "calendar.create_event")).toBe(
+        false,
+      );
+      expect(
+        evidence.rounds.some(
+          (round) =>
+            round.kind === "model_tool_request" &&
+            round.requestedTools.some((tool) =>
+              /^calendar\.(search_events|read)$/.test(tool.toolName),
+            ),
+        ),
+      ).toBe(true);
+      expect(
+        evidence.rounds.some(
+          (round) =>
+            round.kind === "tool_result" && /^calendar\.(search_events|read)$/.test(round.toolName),
+        ),
+      ).toBe(true);
+      expect(evidence.rounds.at(-1)).toMatchObject({ kind: "final_answer" });
+      expect(evidence.finalText.trim().length).toBeGreaterThan(0);
     },
     LIVE_TIMEOUT_MS + 30_000,
   );
