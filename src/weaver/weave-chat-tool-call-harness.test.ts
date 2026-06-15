@@ -225,6 +225,70 @@ describe("runWeaveChatToolCallHarness", () => {
     expect(runtime.dispose).toHaveBeenCalled();
   });
 
+  it("classifies the Weave MCP container network alias as a proven container service URL", async () => {
+    const runtime = createRuntimeMock();
+    const fetchImpl: typeof fetch = vi.fn(async (_input, init) => {
+      const payload = JSON.parse(String(init?.body ?? "{}")) as {
+        messages: Array<Record<string, unknown>>;
+      };
+      const toolMessages = payload.messages.filter((message) => message.role === "tool");
+      if (toolMessages.length === 0) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "tool_calls",
+                message: {
+                  tool_calls: [
+                    {
+                      id: "call_1",
+                      type: "function",
+                      function: {
+                        name: "weave_domain_tools__calendar_search_events",
+                        arguments: JSON.stringify({ from: "2026-06-15" }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: "stop", message: { content: "Keine Termine gefunden." } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const evidence = await runWeaveChatToolCallHarness(
+      createGeneratedConfig({
+        mcp: {
+          servers: {
+            "weave-domain-tools": {
+              transport: "streamable-http",
+              url: "http://mcp.weave.test:8765/mcp",
+              requestTimeoutMs: 240000,
+            },
+          },
+        },
+      }),
+      {
+        baseUrl: "http://host.docker.internal:1234/v1",
+        modelRef: "lmstudio/qwen/qwen3.5-9b",
+        prompt: "Welche Termine habe ich morgen?",
+        timeoutMs: 240_000,
+        getSessionMcpRuntime: vi.fn(async () => runtime),
+        fetchImpl,
+      },
+    );
+
+    expect(evidence.mcpUrlClass).toBe("container-service");
+  });
+
   it("fails early with actionable diagnostics when no allowed MCP tools are discovered", async () => {
     const runtime = createRuntimeMock();
     vi.mocked(runtime.getCatalog).mockResolvedValueOnce({

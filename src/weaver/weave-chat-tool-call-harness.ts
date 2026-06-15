@@ -345,8 +345,14 @@ function classifyMcpUrl(url: string | undefined): string {
   if (["127.0.0.1", "localhost", "::1"].includes(host)) {
     return "host-local";
   }
-  if (host.endsWith(".internal") || host.includes("weave-mcp") || host.includes("service")) {
-    return "container-or-service-dns-unproven-by-client";
+  if (
+    host === "mcp.weave.test" ||
+    host.endsWith(".weave.test") ||
+    host.endsWith(".internal") ||
+    host.includes("weave-mcp") ||
+    host.includes("service")
+  ) {
+    return "container-service";
   }
   return "remote-or-service";
 }
