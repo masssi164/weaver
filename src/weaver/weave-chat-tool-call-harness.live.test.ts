@@ -5,7 +5,7 @@ import { runWeaveChatToolCallHarness } from "./weave-chat-tool-call-harness.js";
 
 const LIVE = isLiveTestEnabled(["OPENCLAW_LIVE_QWEN_TOOLCALL"]);
 const describeLive = LIVE ? describe : describe.skip;
-const LIVE_TIMEOUT_MS = Number(process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_TIMEOUT_MS ?? "240000");
+const LIVE_TIMEOUT_MS = Number(process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_TIMEOUT_MS ?? "300000");
 const LMSTUDIO_BASE_URL =
   process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_BASE_URL ?? "http://127.0.0.1:1234/v1";
 const MODEL_REF = process.env.OPENCLAW_LIVE_QWEN_TOOLCALL_MODEL ?? "lmstudio/qwen/qwen3.5-9b";
