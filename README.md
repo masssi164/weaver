@@ -11,6 +11,16 @@
   <strong>EXFOLIATE! EXFOLIATE!</strong>
 </p>
 
+## Weaver positioning for Weave
+
+Weaver is the Weave-governed runtime line derived from OpenClaw. Weave owns product truth: organization policy, provider/category contracts, domain tools, approval rules, audit, and the signed runtime profile. Weaver owns runtime truth: profile consumption, member-mode lockdown, workspace/state boundaries, generated OpenClaw configuration, and enforcement that normal actions flow back through Weave MCP/domain tools.
+
+The operating rule is **user-rights, organization-whitelisted capabilities**. A Weaver runtime can act only with the eligible user's rights and only through capabilities the organization has enabled, whitelisted, audited, and made revocable. Weaver is opt-in, governed, auditable, and disabled by default; it is a governed, revocable runtime path for scoped user assistance, not an unmanaged autonomy layer.
+
+This repository is not the Weave product itself and does not make a broad autonomous-agent availability claim. Weave remains the source of product, provider, policy, and domain semantics; Weaver is the constrained runtime that applies those signed decisions when the organization explicitly enables it.
+
+The OpenClaw README below is preserved for upstream attribution and inherited runtime context. Its personal-assistant, gateway, and channel descriptions document upstream OpenClaw capabilities; they are not Weaver availability, Weave product, or organization-policy claims unless a signed Weave runtime profile enables the relevant capability.
+
 <p align="center">
   <a href="https://github.com/openclaw/openclaw/actions/workflows/ci.yml?branch=main"><img src="https://img.shields.io/github/actions/workflow/status/openclaw/openclaw/ci.yml?branch=main&style=for-the-badge" alt="CI status"></a>
   <a href="https://github.com/openclaw/openclaw/releases"><img src="https://img.shields.io/github/v/release/openclaw/openclaw?include_prereleases&style=for-the-badge" alt="GitHub release"></a>
