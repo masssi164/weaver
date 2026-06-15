@@ -289,6 +289,125 @@ describe("runWeaveChatToolCallHarness", () => {
     expect(evidence.mcpUrlClass).toBe("container-service");
   });
 
+  it("preserves the Weave MCP JSON-RPC denied error shape as deterministic tool evidence", async () => {
+    const runtime = createRuntimeMock();
+    vi.mocked(runtime.getCatalog).mockResolvedValueOnce({
+      version: 1,
+      generatedAt: Date.now(),
+      servers: {
+        "weave-domain-tools": {
+          serverName: "weave-domain-tools",
+          safeServerName: "weave-domain-tools",
+          launchSummary: "ok",
+          toolCount: 1,
+        },
+      },
+      tools: [
+        {
+          serverName: "weave-domain-tools",
+          safeServerName: "weave-domain-tools",
+          toolName: "boards.comment",
+          description: "Comment on a board task",
+          fallbackDescription: "Comment on a board task",
+          inputSchema: {
+            type: "object",
+            properties: {
+              taskRef: { type: "string" },
+              body: { type: "string" },
+            },
+            required: ["taskRef", "body"],
+            additionalProperties: false,
+          },
+        },
+      ],
+      diagnostics: [],
+    });
+    const weaveDeniedJsonRpc = {
+      jsonrpc: "2.0",
+      id: 4,
+      error: {
+        code: -32000,
+        message: "approval-required-for-boards.comment",
+        data: {
+          auditRef: "audit://mcp/denied/support-safe",
+          supportSafe: true,
+        },
+      },
+    };
+    vi.mocked(runtime.callTool).mockResolvedValueOnce({
+      content: [{ type: "text", text: JSON.stringify(weaveDeniedJsonRpc) }],
+      isError: true,
+    });
+    const fetchImpl: typeof fetch = vi.fn(async (_input, init) => {
+      const payload = JSON.parse(String(init?.body ?? "{}")) as {
+        messages: Array<Record<string, unknown>>;
+      };
+      const toolMessages = payload.messages.filter((message) => message.role === "tool");
+      if (toolMessages.length === 0) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "tool_calls",
+                message: {
+                  tool_calls: [
+                    {
+                      id: "call_1",
+                      type: "function",
+                      function: {
+                        name: "weave_domain_tools__boards_comment",
+                        arguments: JSON.stringify({ taskRef: "task://one", body: "ok" }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              finish_reason: "stop",
+              message: {
+                content: "Board comment needs approval. Audit: audit://mcp/denied/support-safe",
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const evidence = await runWeaveChatToolCallHarness(
+      createGeneratedConfig({
+        tools: { allow: ["mcp:weave-domain-tools:boards.comment"], deny: ["exec", "write"] },
+      }),
+      {
+        baseUrl: "http://lmstudio.internal:1234/v1",
+        modelRef: "lmstudio/qwen/qwen3.5-9b",
+        prompt: "Kommentiere das Board.",
+        getSessionMcpRuntime: vi.fn(async () => runtime),
+        fetchImpl,
+      },
+    );
+
+    expect(runtime.callTool).toHaveBeenCalledWith("weave-domain-tools", "boards.comment", {
+      taskRef: "task://one",
+      body: "ok",
+    });
+    expect(evidence.rounds).toContainEqual({
+      kind: "tool_result",
+      openAiName: "weave_domain_tools__boards_comment",
+      serverName: "weave-domain-tools",
+      toolName: "boards.comment",
+      resultPreview: JSON.stringify(weaveDeniedJsonRpc),
+    });
+  });
+
   it("fails early with actionable diagnostics when no allowed MCP tools are discovered", async () => {
     const runtime = createRuntimeMock();
     vi.mocked(runtime.getCatalog).mockResolvedValueOnce({
