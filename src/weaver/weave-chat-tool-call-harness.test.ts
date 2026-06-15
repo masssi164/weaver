@@ -225,6 +225,37 @@ describe("runWeaveChatToolCallHarness", () => {
     expect(runtime.dispose).toHaveBeenCalled();
   });
 
+  it("fails early with actionable diagnostics when no allowed MCP tools are discovered", async () => {
+    const runtime = createRuntimeMock();
+    vi.mocked(runtime.getCatalog).mockResolvedValueOnce({
+      version: 1,
+      generatedAt: Date.now(),
+      servers: {},
+      tools: [],
+      diagnostics: [
+        {
+          serverName: "weave-domain-tools",
+          safeServerName: "weave-domain-tools",
+          launchSummary: "streamable-http http://127.0.0.1:8765/mcp",
+          message: "connect ECONNREFUSED 127.0.0.1:8765",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+
+    await expect(
+      runWeaveChatToolCallHarness(createGeneratedConfig(), {
+        baseUrl: "http://lmstudio.internal:1234/v1",
+        modelRef: "lmstudio/qwen/qwen3.5-9b",
+        prompt: "Welche Termine habe ich morgen?",
+        getSessionMcpRuntime: vi.fn(async () => runtime),
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/no allowed weave-domain-tools tools.*ECONNREFUSED/is);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(runtime.dispose).toHaveBeenCalled();
+  });
+
   it("fails closed when the model requests an unknown or disallowed tool", async () => {
     const runtime = createRuntimeMock();
     const fetchImpl: typeof fetch = vi.fn(

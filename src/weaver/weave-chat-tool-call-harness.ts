@@ -1,6 +1,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createBundleMcpJsonSchemaValidator } from "../agents/agent-bundle-mcp-runtime.js";
 import type { McpCatalogTool, SessionMcpRuntime } from "../agents/agent-bundle-mcp-types.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { sanitizeAssistantVisibleText } from "../shared/text/assistant-visible-text.js";
 import {
   WEAVE_DOMAIN_TOOLS_SERVER_NAME,
@@ -123,6 +124,9 @@ export async function runWeaveChatToolCallHarness(
   try {
     const catalog = await runtime.getCatalog();
     const toolEntries = buildAllowedToolEntries(config, catalog.tools);
+    if (toolEntries.length === 0) {
+      throw new Error(formatEmptyAllowedToolCatalogError(catalog));
+    }
     const messages: OpenAiChatMessage[] = [{ role: "user", content: options.prompt }];
     const rounds: WeaveChatToolCallHarnessEvidence["rounds"] = [];
     const timeoutMs = options.timeoutMs ?? DEFAULT_LOCAL_MODEL_TIMEOUT_MS;
@@ -230,7 +234,7 @@ async function requireGetSessionMcpRuntime(params: {
   sessionId: string;
   sessionKey?: string;
   workspaceDir: string;
-  cfg: unknown;
+  cfg?: OpenClawConfig;
 }) {
   const mod = await import("../agents/agent-bundle-mcp-tools.js");
   return mod.getOrCreateSessionMcpRuntime(params);
@@ -255,6 +259,26 @@ function buildAllowedToolEntries(
       openAiName: encodeOpenAiToolName(tool.serverName, tool.toolName),
     }))
     .toSorted((left, right) => left.openAiName.localeCompare(right.openAiName));
+}
+
+function formatEmptyAllowedToolCatalogError(
+  catalog: Awaited<ReturnType<SessionMcpRuntime["getCatalog"]>>,
+): string {
+  const diagnostics = (catalog.diagnostics ?? [])
+    .map((entry) => `${entry.serverName}: ${entry.message}`)
+    .join("; ");
+  const discovered = catalog.tools
+    .map((tool) => `${tool.serverName}:${tool.toolName}`)
+    .toSorted()
+    .join(", ");
+  return [
+    `RuntimeProfile MCP discovery found no allowed ${WEAVE_DOMAIN_TOOLS_SERVER_NAME} tools for the Weave chat tool-call harness.`,
+    diagnostics ? `Diagnostics: ${diagnostics}.` : undefined,
+    discovered ? `Discovered tools before policy filtering: ${discovered}.` : undefined,
+    `Ensure the configured streamable-http MCP server is running and exposes an allowed read-only tool such as calendar.search_events or files.search.`,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function toOpenAiTool(entry: ToolCatalogEntry): OpenAiToolSpec {
