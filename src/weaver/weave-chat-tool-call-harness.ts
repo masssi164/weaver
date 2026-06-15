@@ -62,12 +62,22 @@ export type WeaveChatToolCallHarnessEvidence = {
   modelRef: string;
   requestModel: string;
   discoveryStatus: string;
-  toolInventory: Array<{ openAiName: string; serverName: string; toolName: string }>;
+  mcpUrlClass?: string;
+  calendarCreateEventAbsent?: boolean;
+  toolInventory: Array<{
+    openAiName: string;
+    serverName: string;
+    toolName: string;
+  }>;
   rounds: Array<
     | {
         kind: "model_tool_request";
         finishReason: string;
-        requestedTools: Array<{ openAiName: string; serverName: string; toolName: string }>;
+        requestedTools: Array<{
+          openAiName: string;
+          serverName: string;
+          toolName: string;
+        }>;
       }
     | {
         kind: "tool_result";
@@ -91,6 +101,9 @@ export type WeaveChatToolCallHarnessOptions = RuntimeProfileMcpDiscoveryOptions 
   prompt: string;
   timeoutMs?: number;
   maxToolRounds?: number;
+  maxTokens?: number;
+  forceFirstToolCall?: boolean;
+  forcedFirstToolArguments?: Record<string, unknown>;
   fetchImpl?: typeof fetch;
 };
 
@@ -103,7 +116,10 @@ export async function runWeaveChatToolCallHarness(
   config: GeneratedWeaverConfig,
   options: WeaveChatToolCallHarnessOptions,
 ): Promise<WeaveChatToolCallHarnessEvidence> {
-  const modelDecision = decideRuntimeProfileModelPolicy({ config, modelRef: options.modelRef });
+  const modelDecision = decideRuntimeProfileModelPolicy({
+    config,
+    modelRef: options.modelRef,
+  });
   if (modelDecision.decision !== "allow") {
     throw new Error(modelDecision.reason);
   }
@@ -138,6 +154,8 @@ export async function runWeaveChatToolCallHarness(
         baseUrl: options.baseUrl,
         model: requestModel,
         timeoutMs,
+        maxTokens: options.maxTokens,
+        toolChoice: round === 0 && options.forceFirstToolCall ? "required" : "auto",
         fetchImpl: options.fetchImpl ?? fetch,
         messages,
         tools: toolEntries.map(toOpenAiTool),
@@ -150,7 +168,16 @@ export async function runWeaveChatToolCallHarness(
 
       if (toolCalls.length > 0) {
         const resolvedToolCalls = toolCalls.map((toolCall, index) =>
-          resolveRequestedToolCall({ config, toolCall, toolEntries, index }),
+          resolveRequestedToolCall({
+            config,
+            toolCall,
+            toolEntries,
+            index,
+            overrideArguments:
+              round === 0 && options.forceFirstToolCall && index === 0
+                ? options.forcedFirstToolArguments
+                : undefined,
+          }),
         );
         rounds.push({
           kind: "model_tool_request",
@@ -210,6 +237,10 @@ export async function runWeaveChatToolCallHarness(
         modelRef: options.modelRef,
         requestModel,
         discoveryStatus: "discovered",
+        mcpUrlClass: classifyMcpUrl(config.mcp.servers[WEAVE_DOMAIN_TOOLS_SERVER_NAME]?.url),
+        calendarCreateEventAbsent: !toolEntries.some(
+          (entry) => entry.tool.toolName === "calendar.create_event",
+        ),
         toolInventory: toolEntries.map((entry) => ({
           openAiName: entry.openAiName,
           serverName: entry.tool.serverName,
@@ -300,6 +331,26 @@ function sanitizeToolNamePart(value: string): string {
   return value.replace(/[^A-Za-z0-9_]/g, "_");
 }
 
+function classifyMcpUrl(url: string | undefined): string {
+  if (!url) {
+    return "unknown";
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "unknown";
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (["127.0.0.1", "localhost", "::1"].includes(host)) {
+    return "host-local";
+  }
+  if (host.endsWith(".internal") || host.includes("weave-mcp") || host.includes("service")) {
+    return "container-or-service-dns-unproven-by-client";
+  }
+  return "remote-or-service";
+}
+
 function normalizeRequestModel(modelRef: string): string {
   const trimmed = modelRef.trim();
   return trimmed.startsWith("lmstudio/") ? trimmed.slice("lmstudio/".length) : trimmed;
@@ -310,6 +361,7 @@ function resolveRequestedToolCall(params: {
   toolCall: OpenAiToolCall;
   toolEntries: readonly ToolCatalogEntry[];
   index: number;
+  overrideArguments?: Record<string, unknown>;
 }) {
   const id = params.toolCall.id ?? `tool_call_${params.index + 1}`;
   const openAiName = params.toolCall.function?.name?.trim();
@@ -330,10 +382,14 @@ function resolveRequestedToolCall(params: {
   }
   const rawArguments = params.toolCall.function?.arguments ?? "{}";
   let args: unknown;
-  try {
-    args = JSON.parse(rawArguments);
-  } catch {
-    throw new Error(`Model returned malformed JSON arguments for ${openAiName}.`);
+  if (params.overrideArguments) {
+    args = params.overrideArguments;
+  } else {
+    try {
+      args = JSON.parse(rawArguments);
+    } catch {
+      throw new Error(`Model returned malformed JSON arguments for ${openAiName}.`);
+    }
   }
   const validator = createBundleMcpJsonSchemaValidator().getValidator(
     entry.tool.inputSchema as never,
@@ -351,6 +407,8 @@ async function fetchChatCompletion(params: {
   baseUrl: string;
   model: string;
   timeoutMs: number;
+  maxTokens?: number;
+  toolChoice: "auto" | "required";
   fetchImpl: typeof fetch;
   messages: OpenAiChatMessage[];
   tools: OpenAiToolSpec[];
@@ -370,10 +428,11 @@ async function fetchChatCompletion(params: {
           model: params.model,
           messages: params.messages,
           tools: params.tools,
-          tool_choice: "auto",
+          tool_choice: params.toolChoice,
           parallel_tool_calls: false,
           stream: false,
           temperature: 0,
+          ...(params.maxTokens ? { max_tokens: params.maxTokens } : {}),
         }),
         signal: controller.signal,
       },
