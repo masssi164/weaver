@@ -1190,6 +1190,18 @@ export const OpenClawSchema = z
       .optional(),
     memory: MemorySchema,
     mcp: McpConfigSchema,
+    weaver: z
+      .object({
+        generatedBy: z.literal("weaver-runtime-profile"),
+        runtimeProfileHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+        runtimeProfileVersion: z.number().int().positive(),
+        userRuntimeId: z.string().min(1),
+        memberConfigLocked: z.literal(true),
+        permissionMode: z.enum(["deny", "allowlist", "ask", "auto", "full"]),
+        trustedMcpServers: z.array(z.string().min(1)),
+      })
+      .strict()
+      .optional(),
     skills: z
       .object({
         allowBundled: z.array(z.string()).optional(),

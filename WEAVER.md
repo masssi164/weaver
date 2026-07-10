@@ -16,10 +16,10 @@ Normal member mode must not expose raw OpenClaw dashboard, setup wizard, config 
    - Render internal `openclaw.json`, model aliases/default/fallbacks, channel/plugin config, MCP entries, tool filters, sandbox defaults, and audit metadata from the profile only.
    - Treat local config as read-only generated output in member mode.
 
-2. **Stable `weave-chat` channel plugin**
-   - Register one channel id, `weave-chat`.
-   - Talk only to Weave Chat-domain runtime APIs with a short-lived runtime token and `runtimeProfileHash`.
-   - Keep Matrix, Teams, Slack, iMessage, Telegram, and future providers as Weave backend `providerRef` values; do not project provider-named channels into normal Weaver runtime config.
+2. **Stock Matrix channel against the Weave northbound facade**
+   - Project one `channels.matrix` account using OpenClaw's existing Matrix plugin.
+   - Connect only to the Matrix Client-Server protocol facade exposed by Weave, with a short-lived access-token `SecretRef` and `runtimeProfileHash`.
+   - Keep Matrix, Teams, Slack, iMessage, Telegram, and future southbound providers as Weave backend `providerRef` values; the northbound Matrix protocol does not reveal the selected provider.
 
 3. **Policy hardening defaults**
    - Enforce `tools.deny` as a hard global deny layer.
@@ -40,6 +40,6 @@ Normal member mode must not expose raw OpenClaw dashboard, setup wizard, config 
 ## First implementation order
 
 1. Add RuntimeProfile schema/types plus tests that reject unsigned, expired, revoked, raw-secret-bearing, or provider-channel-projecting profiles.
-2. Add a no-network `weave-chat` plugin skeleton and manifest contract tests.
+2. Project the signed profile into stock `channels.matrix` config and prove it against the Weave Matrix facade contract.
 3. Add generated-config/member-lockdown tests for raw config/setup/dashboard writes.
 4. Add audit fixture tests for profile hash/provider/tool/credential decision metadata.

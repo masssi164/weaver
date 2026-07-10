@@ -1,5 +1,11 @@
 import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
 import { z } from "zod";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  loadExecApprovals,
+  saveExecApprovals,
+  type ExecApprovalsFile,
+} from "../infra/exec-approvals.js";
 
 const RAW_SECRET_KEY_PATTERN =
   /(secret|password|refresh.?token|oauth.?token|cookie|api.?key|private.?key)/i;
@@ -10,7 +16,7 @@ const RAW_SECRET_ALLOWED_KEYS = new Set([
   "runtimeTokenCredentialRef",
   "secretRef",
 ]);
-const PROVIDER_CHANNEL_IDS = new Set(["matrix", "msteams", "slack", "imessage", "teams"]);
+const PROVIDER_CHANNEL_IDS = new Set(["msteams", "slack", "imessage", "teams"]);
 const DEFAULT_MEMBER_DENIED_TOOLS = new Set(["gateway", "cron", "exec", "write", "apply_patch"]);
 const MEMBER_ALLOWED_CONTROLS = [
   "style",
@@ -40,6 +46,14 @@ const CredentialRefSchema = z
   })
   .strict();
 
+const OpenClawSecretRefSchema = z
+  .object({
+    source: z.enum(["env", "file", "exec"]),
+    provider: z.string().min(1),
+    id: z.string().min(1),
+  })
+  .strict();
+
 const RuntimeProfileSignatureSchema = z
   .object({
     alg: z.literal("ed25519"),
@@ -48,16 +62,23 @@ const RuntimeProfileSignatureSchema = z
   })
   .strict();
 
-const WeaveChatProfileSchema = z
+const MatrixNorthboundProfileSchema = z
   .object({
-    apiUrl: z.string().url(),
+    homeserver: z.string().url(),
+    userId: z.string().regex(/^@[^:]+:[^:]+$/),
+    memberUserId: z.string().regex(/^@[^:]+:[^:]+$/),
+    roomId: z
+      .string()
+      .regex(/^![^:]+:[^:]+$/)
+      .optional(),
     userRuntimeId: z.string().min(1),
-    runtimeTokenRef: CredentialRefSchema,
+    accessTokenRef: OpenClawSecretRefSchema,
+    dangerouslyAllowPrivateNetwork: z.boolean().default(false),
     providerRefs: z.array(z.string().min(1)).optional(),
-    webhookPath: z.string().startsWith("/").optional(),
-    eventStreamPath: z.string().startsWith("/").optional(),
   })
   .strict();
+
+const WeaverPermissionModeSchema = z.enum(["deny", "allowlist", "ask", "auto", "full"]);
 
 const RuntimeProfileMcpServerSchema = z
   .object({
@@ -94,6 +115,13 @@ const RuntimeProfileMcpServerSchema = z
       .object({
         include: z.array(z.string().min(1)).optional(),
         exclude: z.array(z.string().min(1)).optional(),
+      })
+      .strict()
+      .optional(),
+    approval: z
+      .object({
+        mode: z.literal("plugin"),
+        trustToolAnnotations: z.literal(true),
       })
       .strict()
       .optional(),
@@ -147,9 +175,10 @@ const RuntimeProfileSchema = z
       .strict(),
     channels: z
       .object({
-        "weave-chat": WeaveChatProfileSchema,
+        matrix: MatrixNorthboundProfileSchema,
       })
       .strict(),
+    permissionMode: WeaverPermissionModeSchema.default("ask"),
     mcp: RuntimeProfileMcpSchema,
     mcpPolicy: z
       .object({
@@ -206,30 +235,52 @@ export type GeneratedWeaverConfig = {
   runtimeProfileHash: string;
   runtimeProfileVersion: number;
   memberConfigLocked: true;
+  openClawConfig: OpenClawConfig;
+  hostExecApprovals: {
+    version: 1;
+    defaults: {
+      security: "deny" | "allowlist" | "full";
+      ask: "off" | "on-miss";
+      askFallback: "deny" | "full";
+      autoAllowSkills: false;
+    };
+  };
   models: {
     aliases: Record<string, string>;
     default: string;
     fallbacks: string[];
   };
   channels: {
-    "weave-chat": {
-      apiUrl: string;
+    matrix: {
+      enabled: true;
+      homeserver: string;
+      userId: string;
+      accessToken: z.infer<typeof OpenClawSecretRefSchema>;
+      encryption: false;
+      allowlistOnly: true;
+      groupPolicy: "allowlist";
+      groupAllowFrom: string[];
+      dm: { enabled: true; policy: "allowlist"; allowFrom: string[]; sessionScope: "per-room" };
+      execApprovals: { enabled: true; approvers: string[]; target: "both" };
+      groups?: Record<string, { enabled: true; requireMention: false; users: string[] }>;
+      network?: { dangerouslyAllowPrivateNetwork: true };
       userRuntimeId: string;
       runtimeProfileHash: string;
       runtimeProfileVersion: number;
-      runtimeTokenRef: z.infer<typeof CredentialRefSchema>;
-      credentialRefs: Record<string, z.infer<typeof CredentialRefSchema>>;
-      webhookPath?: string;
-      eventStreamPath?: string;
     };
   };
+  permissionMode: z.infer<typeof WeaverPermissionModeSchema>;
   mcp: {
     servers: Record<string, Record<string, unknown>>;
     sessionIdleTtlMs?: number;
   };
   mcpPolicy: { allowBundleMcp: boolean; allowedPersonalConnections: string[] };
   skills: { allow: string[]; deny: string[] };
-  tools: { allow: string[]; deny: string[] };
+  tools: {
+    allow: string[];
+    deny: string[];
+    exec: { mode: z.infer<typeof WeaverPermissionModeSchema> };
+  };
   sandbox: Record<string, unknown>;
   memberMode: {
     rawConfigLocked: true;
@@ -285,12 +336,42 @@ export function createRuntimeProfileLifecycleHooks(params: {
   ) => Promise<GeneratedWeaverConfig> | GeneratedWeaverConfig;
   restart?: RuntimeProfileLifecycleHooks["restart"];
   rollback?: RuntimeProfileLifecycleHooks["rollback"];
+  syncHostExecApprovals?: (config: GeneratedWeaverConfig) => void;
 }): RuntimeProfileLifecycleHooks {
   return {
-    reload: params.load,
+    async reload(profile) {
+      const config = await params.load(profile);
+      (params.syncHostExecApprovals ?? synchronizeWeaverHostExecApprovals)(config);
+      return config;
+    },
     restart: params.restart ?? (() => undefined),
     rollback: params.rollback ?? (() => undefined),
   };
+}
+
+export function synchronizeWeaverHostExecApprovals(
+  config: GeneratedWeaverConfig,
+  dependencies: {
+    load?: () => ExecApprovalsFile;
+    save?: (file: ExecApprovalsFile) => void;
+  } = {},
+): ExecApprovalsFile {
+  const current = (dependencies.load ?? loadExecApprovals)();
+  const policy = config.hostExecApprovals.defaults;
+  const next: ExecApprovalsFile = {
+    ...current,
+    version: 1,
+    defaults: { ...current.defaults, ...policy },
+    agents: {
+      ...current.agents,
+      main: {
+        ...current.agents?.main,
+        ...policy,
+      },
+    },
+  };
+  (dependencies.save ?? saveExecApprovals)(next);
+  return next;
 }
 
 export function loadSignedWeaverRuntimeProfile(
@@ -299,7 +380,7 @@ export function loadSignedWeaverRuntimeProfile(
 ): GeneratedWeaverConfig {
   const envelope = SignedRuntimeProfileSchema.parse(input);
   assertNoRawProviderSecrets(envelope.profile);
-  assertNoProviderChannelProjection(envelope.profile.channels);
+  assertNorthboundMatrixProjection(envelope.profile.channels);
   assertFreshAndUnrevoked(envelope.profile, options.now ?? new Date());
   assertProfileHash(envelope.profile);
   assertProfileSignature(envelope, options.trustedPublicKeyPem);
@@ -309,45 +390,109 @@ export function loadSignedWeaverRuntimeProfile(
 export function projectRuntimeProfileToConfig(
   profile: WeaverRuntimeProfile,
 ): GeneratedWeaverConfig {
-  const weaveChat = profile.channels["weave-chat"];
+  const matrix = profile.channels.matrix;
   const credentialRefs = profile.credentialRefs;
+  const matrixChannel = {
+    enabled: true as const,
+    homeserver: matrix.homeserver,
+    userId: matrix.userId,
+    accessToken: matrix.accessTokenRef,
+    encryption: false as const,
+    allowlistOnly: true as const,
+    groupPolicy: "allowlist" as const,
+    groupAllowFrom: [matrix.memberUserId],
+    dm: {
+      enabled: true as const,
+      policy: "allowlist" as const,
+      allowFrom: [matrix.memberUserId],
+      sessionScope: "per-room" as const,
+    },
+    execApprovals: {
+      enabled: true as const,
+      approvers: [matrix.memberUserId],
+      target: "both" as const,
+    },
+    groups: matrix.roomId
+      ? {
+          [matrix.roomId]: {
+            enabled: true as const,
+            requireMention: false as const,
+            users: [matrix.memberUserId],
+          },
+        }
+      : undefined,
+    network: matrix.dangerouslyAllowPrivateNetwork
+      ? { dangerouslyAllowPrivateNetwork: true as const }
+      : undefined,
+  };
+  const mcp = {
+    servers: Object.fromEntries(
+      Object.entries(profile.mcp.servers).map(([serverName, server]) => [
+        serverName,
+        { ...server },
+      ]),
+    ),
+    sessionIdleTtlMs: profile.mcp.sessionIdleTtlMs,
+  };
+  const tools = { ...copyPolicy(profile.tools), exec: { mode: profile.permissionMode } };
+  const trustedMcpServers = Object.entries(profile.mcp.servers)
+    .filter(([, server]) => server.enabled !== false)
+    .map(([serverName]) => serverName)
+    .toSorted();
+  const openClawConfig: OpenClawConfig = {
+    weaver: {
+      generatedBy: "weaver-runtime-profile",
+      runtimeProfileHash: profile.runtimeProfileHash,
+      runtimeProfileVersion: profile.profileVersion,
+      userRuntimeId: matrix.userRuntimeId,
+      memberConfigLocked: true,
+      permissionMode: profile.permissionMode,
+      trustedMcpServers,
+    },
+    plugins: { allow: ["matrix"] },
+    channels: { matrix: matrixChannel },
+    mcp,
+    agents: {
+      defaults: {
+        model: { primary: profile.models.default, fallbacks: [...profile.models.fallbacks] },
+        models: Object.fromEntries(
+          Object.entries(profile.models.aliases).map(([alias, modelRef]) => [modelRef, { alias }]),
+        ),
+        skills: [...profile.skills.allow],
+      },
+    },
+    tools,
+  };
   return {
     generatedBy: "weaver-runtime-profile",
     runtimeProfileHash: profile.runtimeProfileHash,
     runtimeProfileVersion: profile.profileVersion,
     memberConfigLocked: true,
+    openClawConfig,
+    hostExecApprovals: hostExecApprovals(profile.permissionMode),
+    permissionMode: profile.permissionMode,
     models: {
       aliases: { ...profile.models.aliases },
       default: profile.models.default,
       fallbacks: [...profile.models.fallbacks],
     },
     channels: {
-      "weave-chat": {
-        apiUrl: weaveChat.apiUrl,
-        userRuntimeId: weaveChat.userRuntimeId,
+      matrix: {
+        ...matrixChannel,
+        userRuntimeId: matrix.userRuntimeId,
         runtimeProfileHash: profile.runtimeProfileHash,
         runtimeProfileVersion: profile.profileVersion,
-        runtimeTokenRef: weaveChat.runtimeTokenRef,
-        credentialRefs: { ...credentialRefs },
-        webhookPath: weaveChat.webhookPath,
-        eventStreamPath: weaveChat.eventStreamPath,
       },
     },
     mcp: {
-      servers: Object.fromEntries(
-        Object.entries(profile.mcp.servers).map(([serverName, server]) => [
-          serverName,
-          { ...server },
-        ]),
-      ),
-      sessionIdleTtlMs: profile.mcp.sessionIdleTtlMs,
+      ...mcp,
     },
     mcpPolicy: {
       allowBundleMcp: profile.mcpPolicy.allowBundleMcp,
       allowedPersonalConnections: [...profile.mcpPolicy.allowedPersonalConnections],
     },
     skills: copyPolicy(profile.skills),
-    tools: copyPolicy(profile.tools),
+    tools,
     sandbox: { ...profile.sandbox },
     memberMode: {
       rawConfigLocked: true,
@@ -363,9 +508,43 @@ export function projectRuntimeProfileToConfig(
       runtimeProfileVersion: profile.profileVersion,
       userId: profile.user.id,
       domain: profile.user.domain,
-      providerRefs: [...(weaveChat.providerRefs ?? [])],
+      providerRefs: [...(matrix.providerRefs ?? [])],
       credentialRefs: Object.keys(credentialRefs).toSorted(),
       exportRef: profile.audit.exportRef,
+    },
+  };
+}
+
+function hostExecApprovals(mode: z.infer<typeof WeaverPermissionModeSchema>) {
+  if (mode === "deny") {
+    return {
+      version: 1 as const,
+      defaults: {
+        security: "deny" as const,
+        ask: "off" as const,
+        askFallback: "deny" as const,
+        autoAllowSkills: false as const,
+      },
+    };
+  }
+  if (mode === "full") {
+    return {
+      version: 1 as const,
+      defaults: {
+        security: "full" as const,
+        ask: "off" as const,
+        askFallback: "full" as const,
+        autoAllowSkills: false as const,
+      },
+    };
+  }
+  return {
+    version: 1 as const,
+    defaults: {
+      security: "allowlist" as const,
+      ask: mode === "allowlist" ? ("off" as const) : ("on-miss" as const),
+      askFallback: "deny" as const,
+      autoAllowSkills: false as const,
     },
   };
 }
@@ -431,17 +610,17 @@ export function decideRuntimeProfileChannelPolicy(params: {
   providerRef?: string;
   credentialRef?: z.infer<typeof CredentialRefSchema>;
 }): RuntimeProfileAuditDecision {
-  const isStableWeaveChat = params.channelId === "weave-chat";
+  const isNorthboundMatrix = params.channelId === "matrix";
   return buildAuditDecision({
     config: params.config,
     toolOrAction: `channel:${params.channelId}`,
     channelId: params.channelId,
     providerRef: params.providerRef,
     credentialRef: params.credentialRef,
-    decision: isStableWeaveChat ? "allow" : "deny",
-    reason: isStableWeaveChat
-      ? "RuntimeProfile projects the stable weave-chat channel"
-      : "member runtime denies provider-native channel selection; route through weave-chat providerRefs",
+    decision: isNorthboundMatrix ? "allow" : "deny",
+    reason: isNorthboundMatrix
+      ? "RuntimeProfile projects OpenClaw Matrix against the Weave northbound facade"
+      : "member runtime denies channels outside the signed Weave northbound projection",
   });
 }
 
@@ -534,7 +713,7 @@ function buildAuditDecision(params: {
   return {
     runtimeProfileHash: params.config.runtimeProfileHash,
     runtimeProfileVersion: params.config.runtimeProfileVersion,
-    userRuntimeId: params.config.channels["weave-chat"].userRuntimeId,
+    userRuntimeId: params.config.channels.matrix.userRuntimeId,
     userId: params.config.audit.userId,
     toolOrAction: params.toolOrAction,
     domain: params.config.audit.domain,
@@ -590,10 +769,12 @@ function assertProfileSignature(
   }
 }
 
-function assertNoProviderChannelProjection(channels: WeaverRuntimeProfile["channels"]) {
+function assertNorthboundMatrixProjection(channels: WeaverRuntimeProfile["channels"]) {
   for (const key of Object.keys(channels)) {
-    if (key !== "weave-chat" || PROVIDER_CHANNEL_IDS.has(key)) {
-      throw new Error(`RuntimeProfile may only project the weave-chat channel, received ${key}`);
+    if (key !== "matrix" || PROVIDER_CHANNEL_IDS.has(key)) {
+      throw new Error(
+        `RuntimeProfile may only project the Weave Matrix northbound channel, received ${key}`,
+      );
     }
   }
 }

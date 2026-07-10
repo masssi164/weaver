@@ -1140,7 +1140,6 @@
                   "channels/location",
                   "channels/troubleshooting",
                   "channels/qa-channel",
-                  "channels/weave-chat",
                   "weaver-runtime-profile"
                 ]
               }

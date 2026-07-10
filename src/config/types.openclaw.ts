@@ -48,6 +48,16 @@ export type SecurityConfig = {
   };
 };
 
+export type WeaverGeneratedRuntimeConfig = {
+  generatedBy: "weaver-runtime-profile";
+  runtimeProfileHash: string;
+  runtimeProfileVersion: number;
+  userRuntimeId: string;
+  memberConfigLocked: true;
+  permissionMode: "deny" | "allowlist" | "ask" | "auto" | "full";
+  trustedMcpServers: string[];
+};
+
 export type SurfaceConfigEntry = {
   silentReply?: SilentReplyPolicyShape;
 };
@@ -151,6 +161,8 @@ export type OpenClawConfig = {
   gateway?: GatewayConfig;
   memory?: MemoryConfig;
   mcp?: McpConfig;
+  /** Generated metadata for an isolated member runtime governed by Weave. */
+  weaver?: WeaverGeneratedRuntimeConfig;
   /** Network-level SSRF protection via an operator-managed forward proxy. */
   proxy?: ProxyConfig;
 };

@@ -107,6 +107,34 @@ describe("createBundleMcpToolRuntime", () => {
     });
   });
 
+  it("binds each MCP tool call to its originating approval conversation", async () => {
+    const base = makeToolRuntime();
+    let capturedContext: Parameters<SessionMcpRuntime["callTool"]>[3];
+    const runtime = await materializeBundleMcpToolsForRun({
+      runtime: {
+        ...base,
+        callTool: async (_serverName, _toolName, _input, approvalContext) => {
+          capturedContext = approvalContext;
+          return { content: [{ type: "text", text: "approved" }], isError: false };
+        },
+      },
+      approvalContext: {
+        sessionKey: "agent:main:matrix:room:weaver",
+        turnSourceChannel: "matrix",
+        turnSourceTo: "!weaver:api.weave.example.org",
+      },
+    });
+
+    await runtime.tools[0].execute("tool-call-1", {}, undefined, undefined);
+
+    expect(capturedContext).toEqual({
+      toolCallId: "tool-call-1",
+      sessionKey: "agent:main:matrix:room:weaver",
+      turnSourceChannel: "matrix",
+      turnSourceTo: "!weaver:api.weave.example.org",
+    });
+  });
+
   it("marks MCP tools parallel only when the server advertises parallel support", async () => {
     const runtime = await materializeBundleMcpToolsForRun({
       runtime: makeToolRuntime({
