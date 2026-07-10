@@ -2,7 +2,11 @@ import crypto from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { ErrorCode, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ElicitRequestSchema,
+  ErrorCode,
+  type CallToolResult,
+} from "@modelcontextprotocol/sdk/types.js";
 import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
 import type {
@@ -15,6 +19,7 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import { Compile } from "typebox/compile";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { logWarn } from "../logger.js";
+import { KeyedAsyncQueue } from "../plugin-sdk/keyed-async-queue.js";
 import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import {
@@ -32,6 +37,7 @@ import type {
 } from "./agent-bundle-mcp-types.js";
 import { loadEmbeddedAgentMcpConfig } from "./embedded-agent-mcp.js";
 import { isMcpConfigRecord } from "./mcp-config-shared.js";
+import { handleMcpElicitation, type McpApprovalContext } from "./mcp-elicitation-approval.js";
 import { resolveMcpTransport } from "./mcp-transport.js";
 
 type BundleMcpSession = {
@@ -41,6 +47,7 @@ type BundleMcpSession = {
   transportType: "stdio" | "sse" | "streamable-http";
   requestTimeoutMs: number;
   supportsParallelToolCalls: boolean;
+  activeApprovalContext?: McpApprovalContext;
   detachStderr?: () => void;
 };
 
@@ -474,6 +481,7 @@ export function createSessionMcpRuntime(params: {
   let lastUsedAt = createdAt;
   let activeLeases = 0;
   let disposed = false;
+  const approvalCallQueue = new KeyedAsyncQueue();
   let catalog: McpToolCatalog | null = null;
   let catalogInFlight: Promise<McpToolCatalog> | undefined;
   let catalogInvalidationGeneration = 0;
@@ -562,6 +570,7 @@ export function createSessionMcpRuntime(params: {
                 version: "0.0.0",
               },
               {
+                capabilities: { elicitation: { form: {} } },
                 jsonSchemaValidator: createBundleMcpJsonSchemaValidator(),
                 listChanged: {
                   tools: {
@@ -590,6 +599,15 @@ export function createSessionMcpRuntime(params: {
               supportsParallelToolCalls: resolved.supportsParallelToolCalls,
               detachStderr: resolved.detachStderr,
             };
+            client.setRequestHandler(ElicitRequestSchema, async (request, extra) =>
+              handleMcpElicitation({
+                request,
+                serverName,
+                cfg: params.cfg,
+                context: session?.activeApprovalContext,
+                signal: extra.signal,
+              }),
+            );
             sessions.set(serverName, session);
           }
 
@@ -659,6 +677,8 @@ export function createSessionMcpRuntime(params: {
                 title: tool.title,
                 description: sanitizeMcpMetadataText(tool.description),
                 inputSchema: tool.inputSchema,
+                ...(tool.annotations ? { annotations: tool.annotations } : {}),
+                ...(tool["_meta"] ? { meta: tool["_meta"] } : {}),
                 fallbackDescription: `Provided by bundle MCP server "${serverName}" (${resolved.description}).`,
               });
             }
@@ -748,25 +768,36 @@ export function createSessionMcpRuntime(params: {
     markUsed() {
       lastUsedAt = Date.now();
     },
-    async callTool(serverName, toolName, input) {
+    async callTool(serverName, toolName, input, approvalContext) {
       failIfDisposed();
       await getCatalog();
       const session = sessions.get(serverName);
       if (!session) {
         throw new Error(`bundle-mcp server "${serverName}" is not connected`);
       }
-      return await runGuardedServerRequest(
-        serverName,
-        async () =>
-          (await session.client.callTool(
-            {
-              name: toolName,
-              arguments: isMcpConfigRecord(input) ? input : {},
-            },
-            undefined,
-            { timeout: session.requestTimeoutMs },
-          )) as CallToolResult,
-      );
+      const invoke = async () => {
+        session.activeApprovalContext = approvalContext;
+        try {
+          return await runGuardedServerRequest(
+            serverName,
+            async () =>
+              (await session.client.callTool(
+                {
+                  name: toolName,
+                  arguments: isMcpConfigRecord(input) ? input : {},
+                },
+                undefined,
+                { timeout: session.requestTimeoutMs },
+              )) as CallToolResult,
+          );
+        } finally {
+          session.activeApprovalContext = undefined;
+        }
+      };
+      // Elicitation handlers read session-local turn context. Serialize every tool call
+      // per server so even an unexpected elicitation from a contextless caller cannot
+      // inherit another conversation's active approval context.
+      return await approvalCallQueue.enqueue(serverName, invoke);
     },
     async listResources(serverName) {
       failIfDisposed();

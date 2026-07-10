@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { SessionMcpRuntime } from "../agents/agent-bundle-mcp-types.js";
+import type { McpToolCatalog, SessionMcpRuntime } from "../agents/agent-bundle-mcp-types.js";
 import {
   discoverGeneratedWeaverMcpTools,
   verifySignedRuntimeProfileMcpDiscovery,
@@ -19,7 +19,7 @@ const now = new Date("2026-05-31T12:00:00.000Z");
 function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWeaverRuntimeProfile {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-  const profileDraft = {
+  const profileDraft: Omit<WeaverRuntimeProfile, "runtimeProfileHash"> = {
     kind: "WeaverRuntimeProfile" as const,
     profileVersion: 7,
     issuedAt: "2026-05-31T11:00:00.000Z",
@@ -31,12 +31,21 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
       fallbacks: ["weave/model-safe"],
     },
     channels: {
-      "weave-chat": {
-        apiUrl: "https://weave.example.org",
+      matrix: {
+        homeserver: "https://api.weave.example.org",
+        userId: "@weaver:api.weave.example.org",
+        memberUserId: "@member:api.weave.example.org",
+        roomId: "!weaver:api.weave.example.org",
         userRuntimeId: "runtime-user-1",
-        runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
+        accessTokenRef: {
+          source: "env" as const,
+          provider: "default",
+          id: "WEAVE_MATRIX_ACCESS_TOKEN",
+        },
+        dangerouslyAllowPrivateNetwork: false,
       },
     },
+    permissionMode: "ask" as const,
     mcp: {
       servers: {
         [WEAVE_DOMAIN_TOOLS_SERVER_NAME]: {
@@ -44,6 +53,7 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
           url: "https://weave.example.org/runtime/mcp",
           auth: "oauth" as const,
           headers: { "x-weave-user-runtime-id": "runtime-user-1" },
+          supportsParallelToolCalls: false,
         },
       },
     },
@@ -58,8 +68,11 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
     credentialRefs: {},
     operatorSupport: { enabled: false },
   };
-  const merged = { ...profileDraft, ...overrides };
-  const profile = {
+  const merged: Omit<WeaverRuntimeProfile, "runtimeProfileHash"> = {
+    ...profileDraft,
+    ...overrides,
+  };
+  const profile: WeaverRuntimeProfile = {
     ...merged,
     runtimeProfileHash: overrides.runtimeProfileHash ?? runtimeProfileHash(merged),
   };
@@ -83,44 +96,39 @@ function createRuntimeMock(): SessionMcpRuntime {
     configFingerprint: "fingerprint",
     createdAt: 0,
     lastUsedAt: 0,
-    getCatalog: vi.fn(async () => ({
-      servers: {
-        [WEAVE_DOMAIN_TOOLS_SERVER_NAME]: {
-          serverName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
-          safeServerName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
-          connected: true,
-          launchSummary: "oauth ok",
+    getCatalog: vi.fn(
+      async () =>
+        ({
+          version: 1,
+          generatedAt: 0,
+          servers: {
+            [WEAVE_DOMAIN_TOOLS_SERVER_NAME]: {
+              serverName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
+              safeServerName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
+              launchSummary: "oauth ok",
+              toolCount: 1,
+            },
+          },
           tools: [
             {
               serverName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
               safeServerName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
               toolName: "weave.calendar.list",
-              safeToolName: "weave.calendar.list",
               description: "List calendar entries",
               inputSchema: { type: "object" },
+              fallbackDescription: "List calendar entries",
             },
           ],
-        },
-      },
-      tools: [
-        {
-          serverName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
-          safeServerName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
-          toolName: "weave.calendar.list",
-          safeToolName: "weave.calendar.list",
-          description: "List calendar entries",
-          inputSchema: { type: "object" },
-        },
-      ],
-      diagnostics: [
-        {
-          serverName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
-          safeServerName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
-          launchSummary: "oauth ok",
-          message: "RuntimeProfile MCP discovery connected successfully.",
-        },
-      ],
-    })),
+          diagnostics: [
+            {
+              serverName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
+              safeServerName: WEAVE_DOMAIN_TOOLS_SERVER_NAME,
+              launchSummary: "oauth ok",
+              message: "RuntimeProfile MCP discovery connected successfully.",
+            },
+          ],
+        }) satisfies McpToolCatalog,
+    ),
     peekCatalog: vi.fn(() => null),
     markUsed: vi.fn(),
     callTool: vi.fn(async () => ({ content: [] })),
@@ -133,7 +141,7 @@ describe("RuntimeProfile MCP discovery", () => {
     const generated = loadSignedWeaverRuntimeProfile(buildEnvelope(), { now });
     const runtime = createRuntimeMock();
     const getSessionMcpRuntime = vi.fn(async ({ cfg }) => {
-      expect(cfg).toEqual({ mcp: generated.mcp });
+      expect(cfg).toEqual(generated.openClawConfig);
       return runtime;
     });
 

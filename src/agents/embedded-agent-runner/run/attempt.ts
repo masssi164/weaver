@@ -1429,6 +1429,14 @@ export async function runEmbeddedAttempt(
             ...tools.map((tool) => tool.name),
             ...(clientTools?.map((tool) => tool.function.name) ?? []),
           ],
+          approvalContext: {
+            agentId: params.agentId,
+            sessionKey: params.sessionKey,
+            turnSourceChannel: params.messageChannel ?? params.messageProvider,
+            turnSourceTo: params.currentChannelId,
+            turnSourceAccountId: params.agentAccountId,
+            turnSourceThreadId: params.currentThreadTs,
+          },
         })
       : undefined;
     const bundleLspEnabled = shouldCreateBundleLspRuntimeForAttempt({

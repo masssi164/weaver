@@ -2,7 +2,6 @@ import {
   getOrCreateSessionMcpRuntime,
   type SessionMcpRuntime,
 } from "../agents/agent-bundle-mcp-tools.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   loadSignedWeaverRuntimeProfile,
   type GeneratedWeaverConfig,
@@ -83,7 +82,7 @@ export async function discoverGeneratedWeaverMcpTools(
       sessionId: options.sessionId ?? `runtime-profile-mcp-${config.runtimeProfileHash}`,
       sessionKey: options.sessionKey,
       workspaceDir: options.workspaceDir ?? process.cwd(),
-      cfg: { mcp: config.mcp } as OpenClawConfig,
+      cfg: config.openClawConfig,
     });
     const catalog = await runtime.getCatalog();
     return buildMcpDiscoveryEvidence({

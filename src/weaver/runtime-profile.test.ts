@@ -1,5 +1,6 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { OpenClawSchema } from "../config/zod-schema.js";
 import {
   decideRuntimeProfileChannelPolicy,
   decideRuntimeProfileMcpPolicy,
@@ -10,6 +11,7 @@ import {
   loadSignedWeaverRuntimeProfile,
   runtimeProfileHash,
   runtimeProfileSigningPayload,
+  synchronizeWeaverHostExecApprovals,
   type SignedWeaverRuntimeProfile,
   type WeaverRuntimeProfile,
 } from "./runtime-profile.js";
@@ -19,7 +21,7 @@ const now = new Date("2026-05-31T12:00:00.000Z");
 function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWeaverRuntimeProfile {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-  const hashable = {
+  const hashable: Omit<WeaverRuntimeProfile, "runtimeProfileHash"> = {
     kind: "WeaverRuntimeProfile" as const,
     profileVersion: 7,
     issuedAt: "2026-05-31T11:00:00.000Z",
@@ -31,15 +33,22 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
       fallbacks: ["weave/model-safe"],
     },
     channels: {
-      "weave-chat": {
-        apiUrl: "https://weave.example.org",
+      matrix: {
+        homeserver: "https://api.weave.example.org",
+        userId: "@weaver:api.weave.example.org",
+        memberUserId: "@member:api.weave.example.org",
+        roomId: "!weaver:api.weave.example.org",
         userRuntimeId: "runtime-user-1",
-        runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
+        accessTokenRef: {
+          source: "env",
+          provider: "default",
+          id: "WEAVE_MATRIX_ACCESS_TOKEN",
+        },
+        dangerouslyAllowPrivateNetwork: false,
         providerRefs: ["matrix:room-a", "slack:channel-b"],
-        webhookPath: "/runtime/weave-chat/webhook",
-        eventStreamPath: "/runtime/weave-chat/events",
       },
     },
+    permissionMode: "ask" as const,
     mcp: {
       servers: {
         "weave-domain-tools": {
@@ -69,8 +78,11 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
     },
     operatorSupport: { enabled: false },
   };
-  const profileDraft = { ...hashable, ...overrides };
-  const profile = {
+  const profileDraft: Omit<WeaverRuntimeProfile, "runtimeProfileHash"> = {
+    ...hashable,
+    ...overrides,
+  };
+  const profile: WeaverRuntimeProfile = {
     ...profileDraft,
     runtimeProfileHash: overrides.runtimeProfileHash ?? runtimeProfileHash(profileDraft),
   };
@@ -88,7 +100,7 @@ function buildEnvelope(overrides: Partial<WeaverRuntimeProfile> = {}): SignedWea
 }
 
 describe("Weaver RuntimeProfile loader", () => {
-  it("loads a signed profile into generated internal OpenClaw config without provider channel projection", () => {
+  it("loads a signed profile into the stock Matrix channel against the Weave facade", () => {
     const envelope = buildEnvelope();
 
     const generated = loadSignedWeaverRuntimeProfile(envelope, {
@@ -97,21 +109,31 @@ describe("Weaver RuntimeProfile loader", () => {
     });
 
     expect(generated.memberConfigLocked).toBe(true);
+    expect(OpenClawSchema.safeParse(generated.openClawConfig)).toMatchObject({ success: true });
     expect(generated.models).toEqual({
       aliases: { fast: "weave/model-fast" },
       default: "fast",
       fallbacks: ["weave/model-safe"],
     });
-    expect(Object.keys(generated.channels)).toEqual(["weave-chat"]);
-    expect(generated.channels["weave-chat"]).toMatchObject({
-      apiUrl: "https://weave.example.org",
+    expect(Object.keys(generated.channels)).toEqual(["matrix"]);
+    expect(generated.channels.matrix).toMatchObject({
+      homeserver: "https://api.weave.example.org",
+      userId: "@weaver:api.weave.example.org",
+      accessToken: { source: "env", provider: "default", id: "WEAVE_MATRIX_ACCESS_TOKEN" },
+      encryption: false,
+      dm: { policy: "allowlist", allowFrom: ["@member:api.weave.example.org"] },
+      execApprovals: {
+        enabled: true,
+        approvers: ["@member:api.weave.example.org"],
+        target: "both",
+      },
       runtimeProfileHash: envelope.profile.runtimeProfileHash,
       runtimeProfileVersion: 7,
       userRuntimeId: "runtime-user-1",
-      runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
     });
-    expect(JSON.stringify(generated.channels)).not.toContain("matrix");
     expect(JSON.stringify(generated.channels)).not.toContain("slack");
+    expect(generated.permissionMode).toBe("ask");
+    expect(generated.tools.exec).toEqual({ mode: "ask" });
     expect(generated.audit.providerRefs).toEqual(["matrix:room-a", "slack:channel-b"]);
     expect(generated.mcp).toMatchObject({
       servers: {
@@ -221,7 +243,7 @@ describe("Weaver RuntimeProfile loader", () => {
 
     const channelDecision = decideRuntimeProfileChannelPolicy({
       config: generated,
-      channelId: "weave-chat",
+      channelId: "matrix",
       providerRef: "matrix:room-a",
       credentialRef: { source: "runtime-token", id: "chat-token" },
     });
@@ -231,28 +253,28 @@ describe("Weaver RuntimeProfile loader", () => {
       userRuntimeId: "runtime-user-1",
       userId: "user-1",
       domain: "example.org",
-      channelId: "weave-chat",
+      channelId: "matrix",
       providerRef: "matrix:room-a",
       credentialRef: { source: "runtime-token", id: "chat-token" },
       decision: "allow",
     });
 
     expect(
-      decideRuntimeProfileChannelPolicy({ config: generated, channelId: "matrix" }),
+      decideRuntimeProfileChannelPolicy({ config: generated, channelId: "slack" }),
     ).toMatchObject({
-      channelId: "matrix",
+      channelId: "slack",
       decision: "deny",
-      reason: expect.stringContaining("provider-native channel"),
+      reason: expect.stringContaining("outside the signed Weave northbound projection"),
     });
 
     const modelDecision = decideRuntimeProfileModelPolicy({
       config: generated,
-      channelId: "weave-chat",
+      channelId: "matrix",
       modelRef: "fast",
       providerRef: "matrix:room-a",
     });
     expect(modelDecision).toMatchObject({
-      channelId: "weave-chat",
+      channelId: "matrix",
       modelRef: "fast",
       providerRef: "matrix:room-a",
       decision: "allow",
@@ -269,7 +291,7 @@ describe("Weaver RuntimeProfile loader", () => {
       '"modelRef":"fast"',
     );
     expect(JSON.stringify(exportRuntimeProfileAuditDecision(channelDecision))).toContain(
-      '"channelId":"weave-chat"',
+      '"channelId":"matrix"',
     );
     expect(JSON.stringify(exportRuntimeProfileAuditDecision(channelDecision))).not.toMatch(
       /secret|token-value|refresh/i,
@@ -312,16 +334,9 @@ describe("Weaver RuntimeProfile loader", () => {
     ).toThrow(/Raw provider secret/);
   });
 
-  it("rejects provider-named channel projections before they can enter generated config", () => {
+  it("rejects southbound or custom channel projections before they can enter generated config", () => {
     const envelope = buildEnvelope();
     const providerChannelCases = [
-      {
-        label: "top-level Matrix channel",
-        channels: {
-          ...envelope.profile.channels,
-          matrix: { homeserver: "https://matrix.example.org" },
-        },
-      },
       {
         label: "top-level Slack channel",
         channels: {
@@ -330,20 +345,20 @@ describe("Weaver RuntimeProfile loader", () => {
         },
       },
       {
-        label: "provider-native config nested inside weave-chat",
+        label: "provider-native config nested inside matrix",
         channels: {
-          "weave-chat": {
-            ...envelope.profile.channels["weave-chat"],
-            matrix: { homeserver: "https://matrix.example.org" },
+          matrix: {
+            ...envelope.profile.channels.matrix,
+            slack: { botTokenRef: { source: "runtime", id: "slack" } },
           },
         },
       },
       {
-        label: "raw provider endpoint nested inside weave-chat",
+        label: "raw southbound endpoint nested inside matrix",
         channels: {
-          "weave-chat": {
-            ...envelope.profile.channels["weave-chat"],
-            homeserver: "https://matrix.example.org",
+          matrix: {
+            ...envelope.profile.channels.matrix,
+            providerHomeserver: "https://matrix.example.org",
           },
         },
       },
@@ -367,14 +382,13 @@ describe("Weaver RuntimeProfile loader", () => {
     }
   });
 
-  it("rejects raw provider credentials even when they are placed near allowed weave-chat credential refs", () => {
+  it("rejects raw provider credentials even when a Matrix SecretRef is present", () => {
     const envelope = buildEnvelope();
 
     const profileWithRawProviderCredential = buildEnvelope({
       channels: {
-        "weave-chat": {
-          ...envelope.profile.channels["weave-chat"],
-          runtimeTokenRef: { source: "runtime-token", id: "chat-token" },
+        matrix: {
+          ...envelope.profile.channels.matrix,
         },
       },
       credentialRefs: {
@@ -400,7 +414,60 @@ describe("Weaver RuntimeProfile loader", () => {
       now,
     });
 
-    expect(generated.channels["weave-chat"].apiUrl).toBe("https://weave.example.org");
+    expect(generated.channels.matrix.homeserver).toBe("https://api.weave.example.org");
     expect(generated.mcp).toEqual({ servers: {}, sessionIdleTtlMs: undefined });
+  });
+
+  it("projects every permission mode into the normalized OpenClaw exec policy", () => {
+    for (const permissionMode of ["deny", "allowlist", "ask", "auto", "full"] as const) {
+      const generated = loadSignedWeaverRuntimeProfile(buildEnvelope({ permissionMode }), { now });
+      expect(generated.permissionMode).toBe(permissionMode);
+      expect(generated.tools.exec.mode).toBe(permissionMode);
+      expect(generated.openClawConfig.tools?.exec?.mode).toBe(permissionMode);
+      expect(generated.hostExecApprovals.defaults).toMatchObject(
+        permissionMode === "full"
+          ? { security: "full", ask: "off", askFallback: "full" }
+          : permissionMode === "deny"
+            ? { security: "deny", ask: "off", askFallback: "deny" }
+            : { security: "allowlist", askFallback: "deny" },
+      );
+    }
+  });
+
+  it("synchronizes the host approvals layer while preserving allow-always entries", () => {
+    const generated = loadSignedWeaverRuntimeProfile(buildEnvelope({ permissionMode: "full" }), {
+      now,
+    });
+    let saved: unknown;
+
+    const next = synchronizeWeaverHostExecApprovals(generated, {
+      load: () => ({
+        version: 1,
+        socket: { path: "/tmp/openclaw.sock", token: "support-safe-test-token" },
+        agents: {
+          main: {
+            security: "allowlist",
+            ask: "on-miss",
+            allowlist: [{ pattern: "/usr/bin/rg", source: "allow-always" }],
+          },
+        },
+      }),
+      save: (file) => {
+        saved = file;
+      },
+    });
+
+    expect(next.defaults).toMatchObject({ security: "full", ask: "off", askFallback: "full" });
+    expect(next.agents?.main).toMatchObject({
+      security: "full",
+      ask: "off",
+      askFallback: "full",
+      allowlist: [{ pattern: "/usr/bin/rg", source: "allow-always" }],
+    });
+    expect(next.socket).toEqual({
+      path: "/tmp/openclaw.sock",
+      token: "support-safe-test-token",
+    });
+    expect(saved).toEqual(next);
   });
 });

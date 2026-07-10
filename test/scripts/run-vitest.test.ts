@@ -385,7 +385,7 @@ describe("scripts/run-vitest", () => {
     expect(
       resolveRunVitestSpawnEnv({ PATH: "/usr/bin" }, [
         "run",
-        "src/weaver/weave-chat-tool-call-harness.live.test.ts",
+        "extensions/openai/openai.live.test.ts",
       ]),
     ).toEqual({
       PATH: "/usr/bin",
@@ -397,7 +397,7 @@ describe("scripts/run-vitest", () => {
         "run",
         "--config",
         "test/vitest/vitest.live.config.ts",
-        "src/weaver/weave-chat-tool-call-harness.live.test.ts",
+        "extensions/openai/openai.live.test.ts",
       ]),
     ).toEqual({
       PATH: "/usr/bin",
@@ -405,10 +405,7 @@ describe("scripts/run-vitest", () => {
       OPENCLAW_VITEST_NO_OUTPUT_TIMEOUT_MS: timeout,
     });
     expect(
-      resolveDefaultVitestNoOutputTimeoutMs([
-        "run",
-        "src/weaver/weave-chat-tool-call-harness.live.test.ts",
-      ]),
+      resolveDefaultVitestNoOutputTimeoutMs(["run", "extensions/openai/openai.live.test.ts"]),
     ).toBe(DEFAULT_LIVE_VITEST_NO_OUTPUT_TIMEOUT_MS);
     expect(
       resolveDefaultVitestNoOutputTimeoutMs([

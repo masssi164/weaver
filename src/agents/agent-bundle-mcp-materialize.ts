@@ -16,6 +16,7 @@ import type {
   SessionMcpRuntime,
 } from "./agent-bundle-mcp-types.js";
 import { normalizeToolParameterSchema } from "./agent-tools-parameter-schema.js";
+import type { McpApprovalContext } from "./mcp-elicitation-approval.js";
 import type { AgentToolResult } from "./runtime/index.js";
 import type { AnyAgentTool } from "./tools/common.js";
 
@@ -350,6 +351,7 @@ export async function materializeBundleMcpToolsForRun(params: {
   runtime: SessionMcpRuntime;
   reservedToolNames?: Iterable<string>;
   disposeRuntime?: () => Promise<void>;
+  approvalContext?: Omit<McpApprovalContext, "toolCallId">;
 }): Promise<BundleMcpToolRuntime> {
   let disposed = false;
   const releaseLease = params.runtime.acquireLease?.();
@@ -364,9 +366,12 @@ export async function materializeBundleMcpToolsForRun(params: {
   const tools = buildBundleMcpToolsFromCatalog({
     catalog,
     reservedToolNames: params.reservedToolNames,
-    createExecute: (tool) => async (_toolCallId: string, input: unknown) => {
+    createExecute: (tool) => async (toolCallId: string, input: unknown) => {
       params.runtime.markUsed();
-      const result = await params.runtime.callTool(tool.serverName, tool.toolName, input);
+      const result = await params.runtime.callTool(tool.serverName, tool.toolName, input, {
+        ...params.approvalContext,
+        toolCallId,
+      });
       return toAgentToolResult({
         serverName: tool.serverName,
         toolName: tool.toolName,

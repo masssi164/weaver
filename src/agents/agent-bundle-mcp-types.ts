@@ -1,6 +1,7 @@
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { TSchema } from "typebox";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { McpApprovalContext } from "./mcp-elicitation-approval.js";
 import type { AnyAgentTool } from "./tools/common.js";
 
 export type BundleMcpToolRuntime = {
@@ -39,6 +40,8 @@ export type McpCatalogTool = {
   title?: string;
   description?: string;
   inputSchema: TSchema;
+  annotations?: ToolAnnotations;
+  meta?: Record<string, unknown>;
   fallbackDescription: string;
 };
 
@@ -71,7 +74,12 @@ export type SessionMcpRuntime = {
   /** Returns the cached catalog only; must not start runtimes, connect transports, or issue tools/list. */
   peekCatalog: () => McpToolCatalog | null;
   markUsed: () => void;
-  callTool: (serverName: string, toolName: string, input: unknown) => Promise<CallToolResult>;
+  callTool: (
+    serverName: string,
+    toolName: string,
+    input: unknown,
+    approvalContext?: McpApprovalContext,
+  ) => Promise<CallToolResult>;
   listResources?: (serverName: string) => Promise<unknown>;
   readResource?: (serverName: string, uri: string) => Promise<unknown>;
   listPrompts?: (serverName: string) => Promise<unknown>;
