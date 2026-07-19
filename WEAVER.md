@@ -1,45 +1,36 @@
-# Weaver RuntimeProfile bootstrap map
+# Weaver Integration Contract
 
-Status: Sprint 13 bootstrap note for `masssi164/weaver#1`.
+Status: target architecture. The current repository does not yet claim this contract is implemented.
 
-## Product boundary
+Weaver is the Weave-governed, upstream-first OpenClaw runtime. It is not a collaboration domain and it does not replace Matrix, Files/WebDAV, Calendar/CalDAV or Weave MCP contracts.
 
-Weaver is the OpenClaw-derived per-user runtime. Weave remains source of truth for domains, provider selection, credentials, policy, and audit. The fork must consume a signed Weave `WeaverRuntimeProfile` and render internal OpenClaw configuration as generated runtime output, not as member-editable product state.
+## Ownership
 
-Normal member mode must not expose raw OpenClaw dashboard, setup wizard, config editing, channel token management, MCP allowlist editing, or secret configuration as a bypass around Weave policy.
+- Weave and Keycloak own entitlement, organization policy, signed RuntimeProfile desired state, secret references, MCP authorization, side effects and audit.
+- OpenClaw owns the agent loop, sessions, Matrix channel, workspace/memory/skill loaders, MCP client and native approval lifecycle.
+- A Weaver cell executes those decisions for one entitled member and owns zero durable bytes.
 
-## Minimal fork seams
+RuntimeProfile configures a cell; it never authorizes a domain side effect. Weave rechecks identity, entitlement, policy, object scope and canonical arguments immediately before every MCP side effect.
 
-1. **RuntimeProfile loader**
-   - Fetch or receive one signed RuntimeProfile from Weave.
-   - Verify signature, profile version, expiry, revocation status, and `runtimeProfileHash` before rendering config.
-   - Render internal `openclaw.json`, model aliases/default/fallbacks, channel/plugin config, MCP entries, tool filters, sandbox defaults, and audit metadata from the profile only.
-   - Treat local config as read-only generated output in member mode.
+## Stateless cell boundary
 
-2. **Stock Matrix channel against the Weave northbound facade**
-   - Project one `channels.matrix` account using OpenClaw's existing Matrix plugin.
-   - Connect only to the Matrix Client-Server protocol facade exposed by Weave, with a short-lived access-token `SecretRef` and `runtimeProfileHash`.
-   - Keep Matrix, Teams, Slack, iMessage, Telegram, and future southbound providers as Weave backend `providerRef` values; the northbound Matrix protocol does not reveal the selected provider.
+Durable state lives only in external authorities:
 
-3. **Policy hardening defaults**
-   - Enforce `tools.deny` as a hard global deny layer.
-   - Keep `bundle-mcp`, gateway, cron, exec, write, and patch-style tools disabled unless the RuntimeProfile explicitly grants a constrained capability.
-   - Use CredentialRefs and runtime tokens only; no provider secrets, OAuth refresh tokens, cookies, or credential-bearing URLs in config, logs, prompts, or support bundles.
+- member Files/WebDAV: bootstrap Markdown, `MEMORY.md`, `memory/**` and approved custom skills;
+- Weave Control Store: desired-state references, lease/fencing, workspace HEAD, wake dedupe/outbox, conflicts and audit metadata;
+- encrypted RuntimeStateStore: complete version-pinned `$OPENCLAW_STATE_DIR` checkpoint, including sessions/SQLite, native approvals, plugin/channel state and stable Matrix device/crypto state;
+- Secret Manager/KMS: credentials, recovery material and encryption keys.
 
-4. **Audit export**
-   - Include `runtimeProfileHash`, user, domain, providerRef, credentialRef where applicable, tool/action, and decision for model, channel, tool, MCP, reload/restart, revocation, and rollback decisions.
+Generated config, a staged workspace/COW overlay, caches, indexes, processes and short-lived credentials are cell-local and disposable. WebDAV never stores SQLite, secrets or Matrix crypto state.
 
-## Existing OpenClaw surfaces to inspect first
+See [Stateless Weaver cell architecture](docs/architecture/stateless-weaver-cell.md) and the [implementation plan](docs/architecture/stateless-weaver-cell-implementation-plan.md). Tracking: [#32](https://github.com/masssi164/weaver/issues/32).
 
-- Channel plugin SDK: `docs/plugins/sdk-channel-plugins.md`.
-- Plugin manifest and channel config contracts: `docs/plugins/manifest.md`, `src/channels/**`, `src/plugins/**`.
-- Existing channel plugins: `extensions/matrix/**`, `extensions/msteams/**`, `extensions/slack/**`, `extensions/telegram/**`.
-- Config write authorization and setup/dashboard paths: `src/channels/plugins/contracts/**`, `ui/**`, `src/config/**`.
-- Tool filtering and deny policy: `src/tools/**`, `src/config/**`, `test/vitest/vitest.tools*.config.ts`.
+## Matrix and approvals
 
-## First implementation order
+Members reach Weaver through the official OpenClaw Matrix plugin against the Weave Matrix facade. Do not create a separate `weave-chat` channel or approval inbox.
 
-1. Add RuntimeProfile schema/types plus tests that reject unsigned, expired, revoked, raw-secret-bearing, or provider-channel-projecting profiles.
-2. Project the signed profile into stock `channels.matrix` config and prove it against the Weave Matrix facade contract.
-3. Add generated-config/member-lockdown tests for raw config/setup/dashboard writes.
-4. Add audit fixture tests for profile hash/provider/tool/credential decision metadata.
+OpenClaw owns native approval request state, Matrix delivery and decision lifecycle. MCP owns invocation and elicitation. Weave reauthorizes and atomically executes the argument-bound action, then records immutable evidence. Tracking: [#30](https://github.com/masssi164/weaver/issues/30).
+
+## Fork budget
+
+No custom agent loop, Matrix channel, approval engine, memory/skill loader or MCP protocol. A core patch needs a proven upstream gap, isolated tests, owner, upstream/reference issue and deletion criterion. OpenClaw upgrades must prove checkpoint migration and rollback without relying on an old cell filesystem.
