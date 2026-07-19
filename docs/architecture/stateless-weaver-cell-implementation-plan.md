@@ -49,7 +49,11 @@ Exit evidence: contract tests for each port, state inventory artifact, encryptio
 
 Implement the closed lifecycle:
 
-`ABSENT -> PROVISIONING -> STOPPED -> ACQUIRING_LEASE -> RESTORING -> MATERIALIZING -> READY <-> BUSY -> COMMITTING -> STOPPING -> STOPPED`
+```text
+ABSENT -> PROVISIONING -> STOPPED -> ACQUIRING_LEASE -> RESTORING -> MATERIALIZING
+MATERIALIZING -> READY <-> BUSY -> COMMITTING -> READY
+READY/BUSY -> STOPPING -> COMMITTING -> STOPPED
+```
 
 Add fail-closed `DEGRADED`, `REVOKING`, `SUSPENDED`, `RESETTING` and `DELETING` paths.
 
