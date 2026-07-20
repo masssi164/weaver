@@ -19,7 +19,6 @@ permissions: {}
 
 jobs:
   auto-response:
-    if: github.repository == 'openclaw/openclaw'
     permissions:
       contents: read
       issues: write
