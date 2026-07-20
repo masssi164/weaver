@@ -46,6 +46,13 @@ upstream OpenClaw issue or pull request, a per-file line limit, and an objective
 Adding a plugin likewise requires an explicit policy entry; placing code under `extensions/` does
 not automatically exempt it from the fork budget.
 
+## Downstream automation
+
+The inherited `Auto response` and `Labeler` workflows are disabled in the `masssi164/weaver`
+repository settings. They require OpenClaw-owned GitHub App credentials and are not Weaver build,
+security, or release evidence. Weaver does not copy those private keys; issue #37 owns the remaining
+inventory and replacement of inherited automation before the default-branch cutover.
+
 ## Upgrade procedure
 
 1. Fetch and verify the candidate annotated OpenClaw stable-release tag and its release notes.
