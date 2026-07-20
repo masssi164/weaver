@@ -15,6 +15,7 @@
   "distributionPaths": [
     "README.md",
     "UPSTREAM.md",
+    "docs/.i18n/glossary.zh-CN.json",
     "docs/docs_map.md",
     "docs/weaver/",
     "package.json",
@@ -26,7 +27,7 @@
   "approvedPlugins": [],
   "approvedCorePatches": [],
   "budgets": {
-    "maxChangedFiles": 10,
+    "maxChangedFiles": 11,
     "maxChangedCoreFiles": 0,
     "maxNonPluginPatchLines": 2150,
     "maxSecurityReleaseLagDays": 7,

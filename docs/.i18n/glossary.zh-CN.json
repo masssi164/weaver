@@ -4,6 +4,14 @@
     "target": "OpenClaw"
   },
   {
+    "source": "Weaver architecture",
+    "target": "Weaver 架构"
+  },
+  {
+    "source": "Weaver operations",
+    "target": "Weaver 运维"
+  },
+  {
     "source": "macOS platform notes",
     "target": "macOS 平台说明"
   },
