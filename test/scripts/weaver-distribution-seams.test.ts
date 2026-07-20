@@ -35,15 +35,6 @@ function validConfig() {
         accessToken: secretRef,
       },
     },
-    mcp: {
-      servers: {
-        weave: {
-          url: "https://api.weave.example/mcp",
-          transport: "streamable-http",
-          auth: "oauth",
-        },
-      },
-    },
   };
 }
 
@@ -76,26 +67,54 @@ function validPolicy() {
 }
 
 describe("RuntimeProfile projection guard", () => {
-  it("accepts only stock encrypted Matrix and OAuth MCP configuration", () => {
+  it("accepts encrypted Matrix while MCP remains dark", () => {
     expect(validateProjectedConfig(validConfig(), workspace)).toEqual(validConfig());
   });
 
   it("binds projector output to the exact RuntimeProfile bytes", () => {
-    const profile = Buffer.from('{"profileVersion":"weave.runtime-profile/v1"}\n');
+    const profile = Buffer.from('{"payload":"signed-runtime-profile-v2"}\n');
     const digest = createHash("sha256").update(profile).digest("hex");
     const envelope = {
-      protocolVersion: "weaver.profile-projection/v1",
+      protocolVersion: "weaver.profile-projection/v2",
+      contractVersion: "weave.runtime-profile/v2",
+      profileId: "rp_example",
+      cellRef: "cell:example",
+      workloadClientId: "weaver-cell-example",
       profileSha256: `sha256:${digest}`,
       signatureVerified: true,
+      disabledCapabilities: ["mcp"],
       openclawConfig: validConfig(),
     };
-    expect(validateProjectionEnvelope(envelope, profile, workspace)).toEqual(validConfig());
+    expect(
+      validateProjectionEnvelope(
+        envelope,
+        profile,
+        workspace,
+        "cell:example",
+        "weaver-cell-example",
+      ),
+    ).toEqual(validConfig());
     expect(() =>
-      validateProjectionEnvelope({ ...envelope, signatureVerified: false }, profile, workspace),
+      validateProjectionEnvelope(
+        { ...envelope, signatureVerified: false },
+        profile,
+        workspace,
+        "cell:example",
+        "weaver-cell-example",
+      ),
     ).toThrow(/signature verification/);
+    expect(() =>
+      validateProjectionEnvelope(
+        { ...envelope, workloadClientId: "weaver-cell-other" },
+        profile,
+        workspace,
+        "cell:example",
+        "weaver-cell-example",
+      ),
+    ).toThrow(/workloadClientId/);
   });
 
-  it("rejects literal credentials, additional channels, and non-OAuth MCP", () => {
+  it("rejects literal credentials, additional channels, and premature MCP projection", () => {
     const literalToken = validConfig();
     literalToken.channels.matrix.accessToken = "secret" as never;
     expect(() => validateProjectedConfig(literalToken, workspace)).toThrow(/SecretRef/);
@@ -106,13 +125,10 @@ describe("RuntimeProfile projection guard", () => {
     extraChannel.channels.slack = { enabled: true };
     expect(() => validateProjectedConfig(extraChannel, workspace)).toThrow(/unknown key/);
 
-    const staticMcp = validConfig();
-    staticMcp.mcp.servers.weave.auth = "none";
-    expect(() => validateProjectedConfig(staticMcp, workspace)).toThrow(
-      /Streamable HTTP and OAuth/,
+    const prematureMcp = { ...validConfig(), mcp: { servers: {} } };
+    expect(() => validateProjectedConfig(prematureMcp, workspace)).toThrow(
+      /client-credentials extension/,
     );
-    Object.assign(staticMcp.mcp.servers.weave, { auth: "oauth", headers: { "X-API-Key": "x" } });
-    expect(() => validateProjectedConfig(staticMcp, workspace)).toThrow(/static headers/);
   });
 
   it("runs a trusted projector and writes one private ephemeral config", () => {
@@ -126,10 +142,10 @@ describe("RuntimeProfile projection guard", () => {
       const config = join(cell, "generated", "openclaw.json");
       mkdirSync(state, { recursive: true });
       mkdirSync(projectedWorkspace);
-      writeFileSync(profile, '{"profileVersion":"weave.runtime-profile/v1"}\n');
+      writeFileSync(profile, '{"payload":"signed-runtime-profile-v2"}\n');
       writeFileSync(
         projector,
-        `#!${process.execPath}\nimport { createHash } from "node:crypto";\nimport { readFileSync } from "node:fs";\nconst value = (name) => process.argv[process.argv.indexOf(name) + 1];\nconst profile = readFileSync(value("--profile"));\nconst workspace = value("--workspace");\nconsole.log(JSON.stringify({\n  protocolVersion: "weaver.profile-projection/v1",\n  profileSha256: "sha256:" + createHash("sha256").update(profile).digest("hex"),\n  signatureVerified: true,\n  openclawConfig: {\n    agents: { defaults: { workspace } },\n    channels: { matrix: { enabled: true, encryption: true, homeserver: "https://matrix.weave.example", accessToken: { source: "env", provider: "default", id: "MATRIX_ACCESS_TOKEN" } } },\n    mcp: { servers: { weave: { url: "https://api.weave.example/mcp", transport: "streamable-http", auth: "oauth" } } }\n  }\n}));\n`,
+        `#!${process.execPath}\nimport { createHash } from "node:crypto";\nimport { readFileSync } from "node:fs";\nconst value = (name) => process.argv[process.argv.indexOf(name) + 1];\nconst profile = readFileSync(value("--profile"));\nconst workspace = value("--workspace");\nconsole.log(JSON.stringify({\n  protocolVersion: "weaver.profile-projection/v2",\n  contractVersion: "weave.runtime-profile/v2",\n  profileId: "rp_example",\n  cellRef: value("--cell-ref"),\n  workloadClientId: value("--workload-client-id"),\n  profileSha256: "sha256:" + createHash("sha256").update(profile).digest("hex"),\n  signatureVerified: true,\n  disabledCapabilities: ["mcp"],\n  openclawConfig: {\n    agents: { defaults: { workspace } },\n    channels: { matrix: { enabled: true, encryption: true, homeserver: "https://matrix.weave.example", accessToken: { source: "env", provider: "default", id: "MATRIX_ACCESS_TOKEN" } } }\n  }\n}));\n`,
         { mode: 0o700 },
       );
       chmodSync(projector, 0o700);
@@ -149,6 +165,10 @@ describe("RuntimeProfile projection guard", () => {
           state,
           "--workspace",
           projectedWorkspace,
+          "--cell-ref",
+          "cell:example",
+          "--workload-client-id",
+          "weaver-cell-example",
           "--check",
         ],
         { encoding: "utf8" },

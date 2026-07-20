@@ -52,6 +52,8 @@ The wrapper executes the projector directly without a shell:
 <projector> --profile <absolute-profile-path>
             --state-dir <absolute-ephemeral-state-path>
             --workspace <absolute-ephemeral-workspace-path>
+            --cell-ref <exact-cell-reference>
+            --workload-client-id <weaver-cell-id>
 ```
 
 The projector must emit exactly one UTF-8 JSON object on stdout and may emit support-safe diagnostics
@@ -59,16 +61,22 @@ on stderr:
 
 ```json
 {
-  "protocolVersion": "weaver.profile-projection/v1",
+  "protocolVersion": "weaver.profile-projection/v2",
+  "contractVersion": "weave.runtime-profile/v2",
+  "profileId": "rp_example",
+  "cellRef": "cell:example",
+  "workloadClientId": "weaver-cell-example",
   "profileSha256": "sha256:<64 lowercase hex characters>",
   "signatureVerified": true,
+  "disabledCapabilities": ["mcp"],
   "openclawConfig": {}
 }
 ```
 
 The SHA-256 value covers the exact profile file bytes received by the wrapper. Exit non-zero,
-timeout, invalid/oversize output, a different digest, `signatureVerified` other than `true`, unknown
-envelope keys, or invalid OpenClaw config fails before the config file or runtime is created.
+timeout, invalid/oversize output, a different digest or orchestrator binding, any v1 version,
+`signatureVerified` other than `true`, unknown envelope keys, or invalid OpenClaw config fails before
+the config file or runtime is created.
 
 The projector is the temporary trust boundary. It must validate the canonical RuntimeProfile
 schema, subject/cell binding, issuer, signature, expiry, entitlement revision, revocation, workspace
@@ -76,13 +84,10 @@ revision, RuntimeState generation, lease/fencing epoch, and policy limits before
 must resolve no secret value into stdout; generated config contains only supported OpenClaw
 SecretRefs.
 
-The temporary protocol can be replaced only after the canonical Weave specification defines:
-
-- the signed bytes or signed-envelope serialization and algorithm identifiers;
-- trust-root discovery, allowed issuers/signers, rotation, revocation, and recovery;
-- clock-skew, expiry, replay, profile-version negotiation, and unknown-field handling;
-- the deterministic RuntimeProfile-to-OpenClaw projection and conformance fixtures;
-- workload attestation and the projector binary/image provenance contract.
+The canonical corpus already defines the flattened EdDSA JWS and RuntimeProfile v2 payload. The
+temporary process protocol can be replaced after ARC implements trust-root discovery, rotation,
+revocation/recovery, clock/replay enforcement, deterministic projection fixtures, workload
+attestation, and projector image provenance.
 
 Until then, never add local canonicalization, embedded trust keys, unsigned development fallback, or
 "last known good" profile acceptance to the wrapper.
@@ -94,9 +99,8 @@ The wrapper accepts only a narrow stock OpenClaw projection:
 - `agents.defaults.workspace` equals the declared ephemeral workspace;
 - `channels.matrix` is the sole configured channel, is enabled, uses HTTPS, requires encryption,
   and references its access token through an OpenClaw SecretRef;
-- every enabled `mcp.servers` entry uses HTTPS Streamable HTTP with `auth: "oauth"`;
-- MCP configuration has no command/stdio transport, static headers, URL query credentials, or TLS
-  verification bypass;
+- `mcp` is absent and the envelope explicitly reports MCP disabled while upstream lacks the
+  client-credentials extension;
 - credential-shaped config fields contain SecretRefs, never literal values.
 
 The projector additionally owns model, sandbox, network, allowed room, allowed tool, native
@@ -111,9 +115,9 @@ A cell orchestrator performs these steps before invoking the wrapper:
 2. fetch and verify the signed RuntimeProfile through the trusted projector boundary;
 3. restore one completed, encrypted RuntimeState generation into the ephemeral state directory;
 4. materialize and atomically activate the signed immutable WebDAV WorkspaceRevision;
-5. broker supported short-lived Matrix, model, storage, and KMS credentials as SecretRefs; keep
-   upstream-managed MCP OAuth refresh material only in encrypted RuntimeState;
-6. run the wrapper and declare `READY` only after stock OpenClaw health plus Matrix/MCP probes pass.
+5. broker supported short-lived Matrix, model, storage, and KMS credentials as SecretRefs;
+6. run the wrapper and declare only the proven Matrix/runtime slice ready; MCP remains Guarded and
+   dark until the upstream client-credentials seam, exact resource, and ARC binding pass live proof.
 
 On stop, the orchestrator drains work, flushes SQLite WAL, publishes and verifies an encrypted
 checkpoint generation, commits allowed workspace writes with HEAD compare-and-swap, revokes

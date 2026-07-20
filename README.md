@@ -11,7 +11,7 @@ distribution documentation, a fail-closed RuntimeProfile launch guard, and a det
 budget. See [UPSTREAM.md](UPSTREAM.md) for provenance and upgrade rules.
 
 > **Status:** target architecture with an executable bootstrap guard. Cross-node reconstruction,
-> production Kubernetes/gVisor isolation, live Matrix E2EE, delegated MCP authorization, backup and
+> production Kubernetes/gVisor isolation, live Matrix E2EE, workload MCP authorization, backup and
 > restore, accessibility, and chaos evidence are not yet complete. This repository does not claim
 > production readiness or a proven zero-durable-byte cell.
 
@@ -22,7 +22,8 @@ budget. See [UPSTREAM.md](UPSTREAM.md) for provenance and upgrade rules.
   leases, fencing, revocation, and support-safe correlation.
 - **OpenClaw** owns the runtime: agent execution, official Matrix integration, MCP consumption,
   sessions, memory/skills, and approvals.
-- **Weave domains** reauthorize every MCP side effect using current user and workload identity.
+- **Weave domains** reauthorize every MCP side effect using the server-resolved member binding and
+  the authenticated per-cell workload identity.
   Neither a RuntimeProfile nor an OpenClaw approval grants a domain permission.
 
 Weaver does not carry a custom agent loop, Matrix channel, approval engine, MCP protocol, or
@@ -42,19 +43,22 @@ pnpm weaver:launch -- \
   --config /run/weaver/cell/generated/openclaw.json \
   --state-dir /run/weaver/cell/state \
   --workspace /run/weaver/cell/workspace \
+  --cell-ref cell:example \
+  --workload-client-id weaver-cell-example \
   -- gateway
 ```
 
 The orchestrator-selected projector verifies the signed RuntimeProfile and emits a stock OpenClaw
-configuration. The guard independently binds that result to the exact profile bytes, rejects raw
-credentials, non-Matrix channels, non-OAuth MCP servers, non-ephemeral paths, and failed or missing
-verification, then launches upstream OpenClaw with `OPENCLAW_CONFIG_PATH` and
-`OPENCLAW_STATE_DIR` fixed to the cell.
+configuration. The guard independently binds that result to the exact signed-envelope bytes and
+the orchestrator-selected cell/client, rejects raw credentials, non-Matrix channels,
+non-ephemeral paths, v1 projections, and failed or missing verification, then launches upstream
+OpenClaw with fixed config and state paths.
 
-The projector seam is necessary because the canonical specification does not yet define signed
-JSON bytes, trust-root discovery, key rotation, or revocation wire semantics. The guard deliberately
-does not invent those security contracts. See [Weaver operations](docs/weaver/operations.md) for the
-exact temporary protocol and replacement criteria.
+RuntimeProfile v2 requires per-cell Keycloak `client_credentials` at MCP. OpenClaw `v2026.7.1`
+supports interactive MCP OAuth but not the pinned client-credentials extension, so the guard
+requires MCP to remain absent and explicitly disabled. It will not silently substitute a human
+OAuth flow, static header, or shared service account. See
+[Weaver operations](docs/weaver/operations.md) for the temporary projector protocol.
 
 ## Architecture
 

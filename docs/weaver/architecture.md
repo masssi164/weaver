@@ -39,9 +39,9 @@ external LDAP/AD/OIDC/SAML
           |    +----> Matrix Authentication Service ---> Matrix facade
           |                                             (official OpenClaw plugin)
           |
-          +---- delegated user OAuth token ---> Weave MCP edge
+          +---- per-cell service account ---> Weave MCP edge
                                                    |
-                                      workload service account + token exchange
+                                      exact binding + token exchange
                                                    |
                                                    v
                                            authorized Weave domain
@@ -53,33 +53,37 @@ the Matrix-facing authorization server with Keycloak upstream. The cell uses the
 Matrix plugin and a SecretRef-backed Matrix credential; it does not receive a Keycloak password,
 OIDC ID token, or southbound provider configuration.
 
-RuntimeProfile projects remote Streamable HTTP MCP servers through upstream `mcp.servers` with
-`auth: "oauth"`. Member-domain calls require active delegated user authority. The MCP edge uses its
-own confidential workload/service-account identity and exchanges the user token for the backend
-audience. A client-credentials token alone is restricted to workload lifecycle/readiness calls and
-cannot impersonate a member. Incoming bearer tokens are never relayed unchanged to a domain.
+Each RuntimeProfile v2 binds one dedicated Keycloak service account to one cell. The cell uses the
+MCP client-credentials extension for the exact MCP resource; the MCP edge resolves the signed
+profile's member binding server-side and exchanges, rather than relays, the workload token for a
+narrower backend token. The service account never becomes the member. Public-client, generic
+service-account, shared-client, and human bearer tokens have no MCP path.
+
+OpenClaw `v2026.7.1` has no client-credentials MCP seam. Weaver therefore projects no MCP server
+and keeps the capability dark until that upstream seam and the ARC binding are proved. Interactive
+OAuth, static headers, or a fork-local credential shim are not substitutes.
 
 ## RuntimeProfile-only startup
 
 The cell entrypoint is `scripts/weaver/launch-from-runtime-profile.mjs`. It does not implement
 signature cryptography. Instead, an immutable orchestrator-selected executable must verify the
-profile and emit the temporary `weaver.profile-projection/v1` envelope documented in
+profile and emit the temporary `weaver.profile-projection/v2` envelope documented in
 [Weaver operations](/weaver/operations#verifier-and-projector-protocol).
 
 The guard then:
 
 1. rejects missing, relative, symlinked, or non-ephemeral runtime paths;
 2. correlates the projector assertion with the SHA-256 digest of the exact profile bytes;
-3. requires a stock OpenClaw configuration with one encrypted Matrix channel, SecretRef-backed
-   Matrix credentials, and HTTPS/OAuth Streamable HTTP MCP servers;
-4. rejects literal credential values and any additional enabled message channel;
+3. matches RuntimeProfile v2, profile ID, cell reference, and per-cell workload client;
+4. requires one encrypted Matrix channel and rejects literal credentials, additional channels,
+   and any MCP projection while the client-credentials seam is unavailable;
 5. writes `openclaw.json` once with mode `0600` inside the declared ephemeral root;
 6. launches upstream `openclaw.mjs gateway` with fixed config and state paths.
 
-This split is fail-closed but temporary. The canonical specification must still define signed
-bytes or a signed-envelope format, algorithm agility, trust-root discovery, key rotation,
-revocation, clock-skew, and version negotiation before the projector can become a standardized
-cross-repository contract.
+The canonical corpus defines a flattened EdDSA JWS over RFC 8785 JCS RuntimeProfile v2. The external
+projector remains temporary implementation plumbing until ARC implements signer discovery, key
+rotation/revocation, clock and replay policy, and deterministic OpenClaw projection. The wrapper
+does not implement a second trust system or accept v1 input.
 
 ## Four external authorities
 
@@ -125,14 +129,16 @@ tools, sandbox, or network policy.
 ## Approvals and side effects
 
 OpenClaw remains the only owner of open plugin/exec approvals, Matrix delivery, decisions, timeout,
-cancellation, and bounded remembered grants. MCP owns elicitation. Weave revalidates current
-Keycloak identity, entitlement, user rights, workload identity, organization policy, object scope,
-canonical arguments, expiry, and revocation immediately before a provider operation.
+cancellation, and bounded remembered grants. MCP owns elicitation. Weave revalidates the
+server-resolved member binding, current Keycloak identity and entitlement, authenticated workload,
+organization policy, object scope, canonical arguments, expiry, and revocation immediately before
+a provider operation.
 
-Weave may record immutable ActionEvidence correlated to the OpenClaw approval, exact argument
-digest, policy/tool/profile revisions, nonce, result, and audit reference. ActionEvidence is neither
-an open workflow nor reusable authority. Weaver has no custom approval inbox or parallel receipt
-state machine.
+OpenClaw emits signed, short-lived, single-use ApprovalDecisionEvidence v2 bound to the exact
+challenge, arguments, principals, cell, profile, policy, and expiry. The receiving Weave domain
+independently authorizes the action, atomically consumes allow-once evidence, and appends immutable
+ActionEvidence v2. Neither evidence type is member authority; ActionEvidence is not an open workflow
+or reusable receipt. Weaver has no parallel approval inbox or v1 reader.
 
 ## Fork boundary
 

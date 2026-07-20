@@ -19,7 +19,8 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const protocolVersion = "weaver.profile-projection/v1";
+const protocolVersion = "weaver.profile-projection/v2";
+const contractVersion = "weave.runtime-profile/v2";
 const maxProfileBytes = 1024 * 1024;
 const maxProjectionBytes = 2 * 1024 * 1024;
 const projectorTimeoutMs = 30_000;
@@ -148,46 +149,62 @@ export function validateProjectedConfig(value, workspacePath) {
     throw new Error("named or additional Matrix accounts are not allowed in a Weaver cell");
   }
 
-  const mcp = requireRecord(config.mcp, "openclawConfig.mcp");
-  const servers = requireRecord(mcp.servers, "openclawConfig.mcp.servers");
-  if (Object.keys(servers).length === 0) {
-    throw new Error("openclawConfig.mcp.servers must contain at least one OAuth MCP server");
-  }
-  for (const [name, rawServer] of Object.entries(servers)) {
-    const server = requireRecord(rawServer, `openclawConfig.mcp.servers.${name}`);
-    if (server.enabled === false) {
-      throw new Error(
-        `disabled MCP server ${JSON.stringify(name)} must be omitted from projection`,
-      );
-    }
-    requireHttpsUrl(server.url, `openclawConfig.mcp.servers.${name}.url`);
-    if (server.transport !== "streamable-http" || server.auth !== "oauth") {
-      throw new Error(`MCP server ${JSON.stringify(name)} must use Streamable HTTP and OAuth`);
-    }
-    if (server.command !== undefined || server.args !== undefined) {
-      throw new Error(`MCP server ${JSON.stringify(name)} may not launch a local process`);
-    }
-    if (server.headers !== undefined) {
-      throw new Error(`MCP server ${JSON.stringify(name)} may not project static headers`);
-    }
-    if (server.sslVerify === false) {
-      throw new Error(`MCP server ${JSON.stringify(name)} may not disable TLS verification`);
-    }
+  if (config.mcp !== undefined) {
+    throw new Error(
+      "MCP projection is disabled until upstream supports the client-credentials extension",
+    );
   }
 
   rejectLiteralCredentials(config);
   return config;
 }
 
-export function validateProjectionEnvelope(value, profileBytes, workspacePath) {
+export function validateProjectionEnvelope(
+  value,
+  profileBytes,
+  workspacePath,
+  expectedCellRef,
+  expectedWorkloadClientId,
+) {
   const envelope = requireRecord(value, "projector output");
   requireOnlyKeys(
     envelope,
-    ["protocolVersion", "profileSha256", "signatureVerified", "openclawConfig"],
+    [
+      "protocolVersion",
+      "contractVersion",
+      "profileId",
+      "cellRef",
+      "workloadClientId",
+      "profileSha256",
+      "signatureVerified",
+      "disabledCapabilities",
+      "openclawConfig",
+    ],
     "projector output",
   );
   if (envelope.protocolVersion !== protocolVersion) {
     throw new Error(`projector output must use ${protocolVersion}`);
+  }
+  if (envelope.contractVersion !== contractVersion) {
+    throw new Error(`projector output must use ${contractVersion}`);
+  }
+  if (!/^rp_[A-Za-z0-9_-]+$/.test(envelope.profileId ?? "")) {
+    throw new Error("projector output must identify one RuntimeProfile v2 profileId");
+  }
+  if (envelope.cellRef !== expectedCellRef) {
+    throw new Error("projector output cellRef does not match the orchestrator binding");
+  }
+  if (envelope.workloadClientId !== expectedWorkloadClientId) {
+    throw new Error("projector output workloadClientId does not match the orchestrator binding");
+  }
+  if (
+    !Array.isArray(envelope.disabledCapabilities) ||
+    envelope.disabledCapabilities.length !== 1 ||
+    envelope.disabledCapabilities[0] !== "mcp"
+  ) {
+    throw new Error(
+      "projector output must keep MCP disabled until client-credentials is supported",
+    );
   }
   if (envelope.signatureVerified !== true) {
     throw new Error("projector did not assert successful RuntimeProfile signature verification");
@@ -208,6 +225,8 @@ function parseArguments(argv) {
     "--config",
     "--state-dir",
     "--workspace",
+    "--cell-ref",
+    "--workload-client-id",
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -289,10 +308,29 @@ function writeGeneratedConfig(configPath, ephemeralRoot, config) {
   }
 }
 
-function runProjector(projector, profilePath, stateDir, workspacePath, profileBytes) {
+function runProjector(
+  projector,
+  profilePath,
+  stateDir,
+  workspacePath,
+  cellRef,
+  workloadClientId,
+  profileBytes,
+) {
   const result = spawnSync(
     projector,
-    ["--profile", profilePath, "--state-dir", stateDir, "--workspace", workspacePath],
+    [
+      "--profile",
+      profilePath,
+      "--state-dir",
+      stateDir,
+      "--workspace",
+      workspacePath,
+      "--cell-ref",
+      cellRef,
+      "--workload-client-id",
+      workloadClientId,
+    ],
     {
       encoding: "utf8",
       env: process.env,
@@ -316,7 +354,13 @@ function runProjector(projector, profilePath, stateDir, workspacePath, profileBy
   } catch {
     throw new Error("RuntimeProfile projector did not emit one valid JSON object");
   }
-  return validateProjectionEnvelope(envelope, profileBytes, workspacePath);
+  return validateProjectionEnvelope(
+    envelope,
+    profileBytes,
+    workspacePath,
+    cellRef,
+    workloadClientId,
+  );
 }
 
 async function main() {
@@ -329,6 +373,8 @@ async function main() {
       "config",
       "state_dir",
       "workspace",
+      "cell_ref",
+      "workload_client_id",
     ]) {
       requireString(options[field], `--${field.replaceAll("_", "-")}`);
     }
@@ -370,6 +416,8 @@ async function main() {
       options.profile,
       options.state_dir,
       options.workspace,
+      options.cell_ref,
+      options.workload_client_id,
       profileBytes,
     );
     writeGeneratedConfig(options.config, options.ephemeral_root, config);

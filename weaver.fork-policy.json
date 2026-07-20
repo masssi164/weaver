@@ -15,6 +15,7 @@
   "distributionPaths": [
     "README.md",
     "UPSTREAM.md",
+    ".github/workflows/auto-response.yml",
     "docs/weaver/",
     "package.json",
     "scripts/weaver/check-fork-boundary.mjs",
@@ -25,9 +26,9 @@
   "approvedPlugins": [],
   "approvedCorePatches": [],
   "budgets": {
-    "maxChangedFiles": 9,
+    "maxChangedFiles": 10,
     "maxChangedCoreFiles": 0,
-    "maxNonPluginPatchLines": 2000,
+    "maxNonPluginPatchLines": 2200,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
   }
