@@ -48,10 +48,12 @@ not automatically exempt it from the fork budget.
 
 ## Downstream automation
 
-The inherited `Auto response` and `Labeler` workflows are disabled in the `masssi164/weaver`
-repository settings. They require OpenClaw-owned GitHub App credentials and are not Weaver build,
-security, or release evidence. Weaver does not copy those private keys; issue #37 owns the remaining
-inventory and replacement of inherited automation before the default-branch cutover.
+The inherited `Auto response`, `Labeler`, `OpenGrep — PR Diff`, and `OpenGrep — Full` workflows are
+disabled in the `masssi164/weaver` repository settings. The first pair requires OpenClaw-owned
+GitHub App credentials; the OpenGrep pair hard-codes Blacksmith runner labels that are not
+provisioned downstream. They are not Weaver build, security, or release evidence. Weaver neither
+copies those private keys nor rewrites upstream workflow bytes; issue #37 owns the supported
+replacement and remaining automation inventory before the default-branch cutover.
 
 ## Upgrade procedure
 
