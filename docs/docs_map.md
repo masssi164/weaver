@@ -9910,6 +9910,34 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: systemd tuning checklist (optional)
   - H2: Related
 
+## weaver/architecture.md
+
+- Route: /weaver/architecture
+- Headings:
+  - H1: Weaver Architecture
+  - H2: Ownership
+  - H2: Identity and protocol path
+  - H2: RuntimeProfile-only startup
+  - H2: Four external authorities
+  - H2: Workspace, memory, and skills
+  - H2: Approvals and side effects
+  - H2: Fork boundary
+
+## weaver/operations.md
+
+- Route: /weaver/operations
+- Headings:
+  - H1: Weaver Operations
+  - H2: Supported entrypoint
+  - H2: Verifier and projector protocol
+  - H2: Generated config gate
+  - H2: Lifecycle ordering
+  - H2: Adapter profiles
+  - H3: Local dogfood
+  - H3: Production evidence target
+  - H2: Health, evidence, and failure behavior
+  - H2: Fork operations
+
 ## web/control-ui.md
 
 - Route: /web/control-ui
