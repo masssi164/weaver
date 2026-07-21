@@ -1,0 +1,61 @@
+name: Weaver distribution
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+      - "cutover/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weaver-distribution-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  distribution-boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up pinned Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24.15.0
+
+      - name: Verify the signed upstream release object
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(node -p "JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).upstream.release")"
+          commit="$(node -p "JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).upstream.commit")"
+          git fetch --force --no-tags https://github.com/openclaw/openclaw.git "refs/tags/${tag}:refs/tags/${tag}"
+          test "$(git cat-file -t "${tag}")" = tag
+          test "$(git rev-parse "${tag}^{}")" = "${commit}"
+          tag_object="$(git rev-parse "${tag}^{tag}")"
+          verification="$(gh api "repos/openclaw/openclaw/git/tags/${tag_object}")"
+          test "$(jq -r '.verification.verified' <<<"${verification}")" = true
+          test "$(jq -r '.verification.reason' <<<"${verification}")" = valid
+          test "$(jq -r '.object.sha' <<<"${verification}")" = "${commit}"
+
+      - name: Install the locked toolchain dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Enforce the thin-fork boundary
+        run: pnpm check:weaver-fork
+
+      - name: Test distribution seams
+        run: pnpm test:weaver-distribution
+
+      - name: Verify the reviewable delta
+        run: git diff --check

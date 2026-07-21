@@ -13,6 +13,7 @@
     "latestReviewedReleaseDate": "2026-07-13"
   },
   "distributionPaths": [
+    ".github/workflows/weaver-distribution.yml",
     "README.md",
     "UPSTREAM.md",
     "docs/.i18n/glossary.zh-CN.json",
@@ -27,9 +28,9 @@
   "approvedPlugins": [],
   "approvedCorePatches": [],
   "budgets": {
-    "maxChangedFiles": 11,
+    "maxChangedFiles": 12,
     "maxChangedCoreFiles": 0,
-    "maxNonPluginPatchLines": 2150,
+    "maxNonPluginPatchLines": 2250,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
   }

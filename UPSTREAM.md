@@ -52,8 +52,16 @@ The inherited `Auto response`, `Labeler`, `OpenGrep — PR Diff`, and `OpenGrep 
 disabled in the `masssi164/weaver` repository settings. The first pair requires OpenClaw-owned
 GitHub App credentials; the OpenGrep pair hard-codes Blacksmith runner labels that are not
 provisioned downstream. They are not Weaver build, security, or release evidence. Weaver neither
-copies those private keys nor rewrites upstream workflow bytes; issue #37 owns the supported
-replacement and remaining automation inventory before the default-branch cutover.
+copies those private keys nor rewrites upstream workflow bytes.
+
+`Weaver distribution / distribution-boundary` is the only downstream required check. It uses a
+GitHub-hosted runner and no product secrets, verifies the annotated upstream tag object and exact
+peeled commit through GitHub's signature-verification record, enforces the zero-core-patch budget,
+and runs the focused distribution tests. Other inherited workflows are informational unless a
+later reviewed policy explicitly adopts them. Inherited publishing, deployment, translation,
+external-service, and live-transport workflows are not Weaver release authority and remain
+unrequired; missing upstream credentials or unavailable runners never become a release waiver.
+Issue #37 owns the settings inventory and quarantine record.
 
 ## Upgrade procedure
 
