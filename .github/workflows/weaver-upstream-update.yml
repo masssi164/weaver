@@ -1,0 +1,367 @@
+name: Weaver signed upstream update
+
+on:
+  schedule:
+    - cron: "17 5 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weaver-upstream-stable-update
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  NODE_VERSION: "24.15.0"
+  EVIDENCE_ARTIFACT: weaver-upstream-update-evidence
+
+jobs:
+  verify-candidate:
+    name: Verify stable candidate without write credentials
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    outputs:
+      update-available: ${{ steps.discover.outputs.update_available }}
+      release: ${{ steps.discover.outputs.release }}
+      commit: ${{ steps.discover.outputs.commit }}
+      candidate-sha: ${{ steps.candidate.outputs.sha }}
+      branch: ${{ steps.candidate.outputs.branch }}
+      image-digest: ${{ steps.image.outputs.digest }}
+      oci-sha256: ${{ steps.oci.outputs.sha256 }}
+    steps:
+      - name: Check out the trusted Weaver baseline
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pinned Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Discover the configured stable channel
+        id: discover
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/weaver-evidence"
+          node scripts/weaver/prepare-upstream-update.mjs discover \
+            --policy weaver.fork-policy.json \
+            --output "$RUNNER_TEMP/weaver-evidence/upstream-release.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Install the locked baseline toolchain
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Gate the currently selected dependency graph
+        id: baseline-vulnerability
+        continue-on-error: true
+        run: |
+          pnpm deps:vuln:gate \
+            --json "$RUNNER_TEMP/weaver-evidence/dependency-vulnerability-gate.json" \
+            --markdown "$RUNNER_TEMP/weaver-evidence/dependency-vulnerability-gate.md"
+
+      - name: Stop after an idempotent current-release scan
+        if: steps.discover.outputs.update_available != 'true'
+        env:
+          VULNERABILITY_GATE_OUTCOME: ${{ steps.baseline-vulnerability.outcome }}
+        run: |
+          test "$VULNERABILITY_GATE_OUTCOME" = success
+          echo "The exact signed stable release is already pinned; no update PR is needed." |
+            tee "$RUNNER_TEMP/weaver-evidence/idempotent-scan.txt"
+
+      - name: Verify the annotated tag against the authoritative signer policy
+        if: steps.discover.outputs.update_available == 'true'
+        env:
+          CANDIDATE_COMMIT: ${{ steps.discover.outputs.commit }}
+          CANDIDATE_RELEASE: ${{ steps.discover.outputs.release }}
+          CANDIDATE_TAG_OBJECT: ${{ steps.discover.outputs.tag_object }}
+        run: |
+          set -euo pipefail
+          candidate_ref="refs/weaver-upstream-candidates/${CANDIDATE_RELEASE}"
+          git fetch --no-tags https://github.com/openclaw/openclaw.git \
+            "refs/tags/${CANDIDATE_RELEASE}:${candidate_ref}"
+          test "$(git cat-file -t "${candidate_ref}")" = tag
+          test "$(git rev-parse "${candidate_ref}^{tag}")" = "${CANDIDATE_TAG_OBJECT}"
+          test "$(git rev-parse "${candidate_ref}^{}")" = "${CANDIDATE_COMMIT}"
+          git -c gpg.ssh.allowedSignersFile="$PWD/weaver.upstream-allowed-signers" \
+            verify-tag --raw "${candidate_ref}" \
+            2>&1 | tee "$RUNNER_TEMP/weaver-evidence/tag-signature-verification.txt"
+          grep -F 'Good "git" signature for vincentkoc@openclaw' \
+            "$RUNNER_TEMP/weaver-evidence/tag-signature-verification.txt"
+
+      - name: Rebase the governed distribution delta onto the candidate
+        id: candidate
+        if: steps.discover.outputs.update_available == 'true'
+        env:
+          BASELINE_COMMIT: ${{ steps.discover.outputs.commit }}
+          CANDIDATE_RELEASE: ${{ steps.discover.outputs.release }}
+        run: |
+          set -euo pipefail
+          current_upstream="$(node -p \
+            "JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).upstream.commit")"
+          printf '%s\n' "$current_upstream" > \
+            "$RUNNER_TEMP/weaver-evidence/current-upstream-commit.txt"
+          mapfile -t distribution_paths < <(node -e \
+            "console.log(JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).distributionPaths.join('\\n'))")
+          git diff --binary --full-index "${current_upstream}..HEAD" -- \
+            "${distribution_paths[@]}" > "$RUNNER_TEMP/weaver-distribution.patch"
+          candidate_branch="automation/upstream-${CANDIDATE_RELEASE#v}"
+          git switch --detach "${BASELINE_COMMIT}"
+          git switch -c "${candidate_branch}"
+          git apply --index --3way "$RUNNER_TEMP/weaver-distribution.patch"
+          node scripts/weaver/prepare-upstream-update.mjs update-policy \
+            --policy weaver.fork-policy.json \
+            --evidence "$RUNNER_TEMP/weaver-evidence/upstream-release.json" \
+            --reviewed-at "$(date -u +%Y-%m-%d)"
+          git add weaver.fork-policy.json
+          git -c user.name=weaver-upstream-bot \
+            -c user.email=weaver-upstream-bot@users.noreply.github.com \
+            commit -m "chore(upstream): prepare ${CANDIDATE_RELEASE}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "branch=${candidate_branch}" >> "$GITHUB_OUTPUT"
+
+      - name: Install the candidate lockfile
+        if: steps.discover.outputs.update_available == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Inventory the exact upstream change
+        if: steps.discover.outputs.update_available == 'true'
+        env:
+          CANDIDATE_UPSTREAM: ${{ steps.discover.outputs.commit }}
+        run: |
+          current_upstream="$(cat "$RUNNER_TEMP/weaver-evidence/current-upstream-commit.txt")"
+          node scripts/weaver/prepare-upstream-update.mjs inventory \
+            --base "$current_upstream" \
+            --head "$CANDIDATE_UPSTREAM" \
+            --output "$RUNNER_TEMP/weaver-evidence/change-inventory.json"
+
+      - name: Enforce fork and distribution contracts
+        if: steps.discover.outputs.update_available == 'true'
+        run: |
+          WEAVER_FORK_CHECK_DATE="$(date -u +%Y-%m-%d)" \
+            pnpm check:weaver-fork --json |
+            tee "$RUNNER_TEMP/weaver-evidence/fork-budget.json"
+          pnpm test:weaver-distribution 2>&1 |
+            tee "$RUNNER_TEMP/weaver-evidence/distribution-tests.txt"
+          pnpm test:contracts 2>&1 |
+            tee "$RUNNER_TEMP/weaver-evidence/contract-tests.txt"
+
+      - name: Build and run behavior tests
+        if: steps.discover.outputs.update_available == 'true'
+        run: |
+          pnpm build 2>&1 | tee "$RUNNER_TEMP/weaver-evidence/build.txt"
+          pnpm test:unit 2>&1 | tee "$RUNNER_TEMP/weaver-evidence/behavior-tests.txt"
+          git diff --check
+
+      - name: Gate candidate vulnerabilities
+        if: steps.discover.outputs.update_available == 'true'
+        run: |
+          pnpm deps:vuln:gate \
+            --json "$RUNNER_TEMP/weaver-evidence/candidate-vulnerability-gate.json" \
+            --markdown "$RUNNER_TEMP/weaver-evidence/candidate-vulnerability-gate.md"
+
+      - name: Set up pinned Buildx
+        if: steps.discover.outputs.update_available == 'true'
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Build candidate OCI archive with SBOM and provenance
+        id: image
+        if: steps.discover.outputs.update_available == 'true'
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          platforms: linux/amd64
+          outputs: type=oci,dest=${{ runner.temp }}/weaver-candidate.oci.tar
+          sbom: true
+          provenance: mode=max
+          push: false
+
+      - name: Record OCI, SBOM, and provenance evidence
+        id: oci
+        if: steps.discover.outputs.update_available == 'true'
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          oci_sha256="$(sha256sum "$RUNNER_TEMP/weaver-candidate.oci.tar" | cut -d' ' -f1)"
+          mkdir "$RUNNER_TEMP/weaver-oci"
+          tar -xf "$RUNNER_TEMP/weaver-candidate.oci.tar" -C "$RUNNER_TEMP/weaver-oci"
+          tar -tf "$RUNNER_TEMP/weaver-candidate.oci.tar" |
+            sort > "$RUNNER_TEMP/weaver-evidence/oci-inventory.txt"
+          test -n "$IMAGE_DIGEST"
+          sbom_blob="$(grep -rl 'https://spdx.dev/Document' \
+            "$RUNNER_TEMP/weaver-oci/blobs/sha256" | sed -n '1p')"
+          provenance_blob="$(grep -rl 'https://slsa.dev/provenance/v1' \
+            "$RUNNER_TEMP/weaver-oci/blobs/sha256" | sed -n '1p')"
+          test -n "$sbom_blob"
+          test -n "$provenance_blob"
+          sbom_digest="sha256:$(basename "$sbom_blob")"
+          provenance_digest="sha256:$(basename "$provenance_blob")"
+          jq -n \
+            --arg imageDigest "$IMAGE_DIGEST" \
+            --arg ociArchiveSha256 "sha256:${oci_sha256}" \
+            --arg sbomDigest "$sbom_digest" \
+            --arg provenanceDigest "$provenance_digest" \
+            --arg commit "$CANDIDATE_SHA" \
+            '{imageDigest:$imageDigest,ociArchiveSha256:$ociArchiveSha256,sbomDigest:$sbomDigest,provenanceDigest:$provenanceDigest,commit:$commit}' \
+            > "$RUNNER_TEMP/weaver-evidence/image-evidence.json"
+          echo "sha256=sha256:${oci_sha256}" >> "$GITHUB_OUTPUT"
+
+      - name: Prove a fresh clone builds from the candidate commit
+        if: steps.discover.outputs.update_available == 'true'
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git clone --no-local --no-hardlinks "$PWD" "$RUNNER_TEMP/weaver-fresh-clone"
+          git -C "$RUNNER_TEMP/weaver-fresh-clone" checkout --detach "$CANDIDATE_SHA"
+          corepack enable
+          pnpm --dir "$RUNNER_TEMP/weaver-fresh-clone" install --frozen-lockfile --ignore-scripts
+          WEAVER_FORK_CHECK_DATE="$(date -u +%Y-%m-%d)" \
+            pnpm --dir "$RUNNER_TEMP/weaver-fresh-clone" check:weaver-fork
+          pnpm --dir "$RUNNER_TEMP/weaver-fresh-clone" build
+          git -C "$RUNNER_TEMP/weaver-fresh-clone" diff --exit-code
+
+      - name: Bundle the verified candidate for the credentialed publish job
+        if: steps.discover.outputs.update_available == 'true'
+        env:
+          CANDIDATE_BRANCH: ${{ steps.candidate.outputs.branch }}
+        run: |
+          git bundle create "$RUNNER_TEMP/weaver-evidence/candidate.bundle" \
+            "$CANDIDATE_BRANCH"
+          git bundle verify "$RUNNER_TEMP/weaver-evidence/candidate.bundle"
+
+      - name: Upload support-safe candidate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ env.EVIDENCE_ARTIFACT }}
+          path: ${{ runner.temp }}/weaver-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-draft:
+    name: Create immutable baseline and draft PR
+    needs: verify-candidate
+    if: needs.verify-candidate.outputs.update-available == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out trusted main without persisted credentials
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the verified candidate bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ env.EVIDENCE_ARTIFACT }}
+          path: ${{ runner.temp }}/weaver-evidence
+
+      - name: Publish one immutable baseline and one idempotent draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_BRANCH: ${{ needs.verify-candidate.outputs.branch }}
+          CANDIDATE_COMMIT: ${{ needs.verify-candidate.outputs.commit }}
+          CANDIDATE_SHA: ${{ needs.verify-candidate.outputs.candidate-sha }}
+          CANDIDATE_RELEASE: ${{ needs.verify-candidate.outputs.release }}
+          IMAGE_DIGEST: ${{ needs.verify-candidate.outputs.image-digest }}
+          OCI_SHA256: ${{ needs.verify-candidate.outputs.oci-sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing_pr="$(gh pr list --repo "$REPOSITORY" --state open \
+            --head "$CANDIDATE_BRANCH" --json url --jq '.[0].url // empty')"
+          if [ -n "$existing_pr" ]; then
+            existing_head="$(gh pr view "$existing_pr" --repo "$REPOSITORY" \
+              --json headRefOid --jq '.headRefOid')"
+            existing_upstream="$(gh api \
+              "repos/${REPOSITORY}/contents/weaver.fork-policy.json?ref=${existing_head}" \
+              --jq '.content' | base64 --decode | jq -r '.upstream.commit')"
+            test "$existing_upstream" = "$CANDIDATE_COMMIT"
+            echo "Existing update PR: $existing_pr"
+            exit 0
+          fi
+
+          git fetch "$RUNNER_TEMP/weaver-evidence/candidate.bundle" \
+            "${CANDIDATE_BRANCH}:refs/heads/${CANDIDATE_BRANCH}"
+          test "$(git rev-parse "${CANDIDATE_BRANCH}")" = "$CANDIDATE_SHA"
+          git cat-file -e "${CANDIDATE_COMMIT}^{commit}"
+          gh auth setup-git
+
+          baseline_branch="upstream/${CANDIDATE_RELEASE}-base"
+          encoded_baseline="${baseline_branch//\//%2F}"
+          existing_baseline="$(gh api "repos/${REPOSITORY}/git/ref/heads/${encoded_baseline}" \
+            --jq '.object.sha' 2>/dev/null || true)"
+          if [ -n "$existing_baseline" ]; then
+            test "$existing_baseline" = "$CANDIDATE_COMMIT"
+          else
+            git branch "$baseline_branch" "$CANDIDATE_COMMIT"
+            git push "https://github.com/${REPOSITORY}.git" \
+              "refs/heads/${baseline_branch}:refs/heads/${baseline_branch}"
+          fi
+
+          existing_branch="$(gh api "repos/${REPOSITORY}/git/ref/heads/${CANDIDATE_BRANCH//\//%2F}" \
+            --jq '.object.sha' 2>/dev/null || true)"
+          if [ -n "$existing_branch" ]; then
+            echo "Remote candidate branch exists without an open PR; refusing to rewrite it." >&2
+            exit 1
+          fi
+          git push "https://github.com/${REPOSITORY}.git" \
+            "refs/heads/${CANDIDATE_BRANCH}:refs/heads/${CANDIDATE_BRANCH}"
+
+          body="$RUNNER_TEMP/weaver-upstream-pr.md"
+          inventory_summary="$(jq -r \
+            '.groups | to_entries[] | "- \\(.key): \\(.value | length) changed files"' \
+            "$RUNNER_TEMP/weaver-evidence/change-inventory.json")"
+          fork_metrics="$(jq -c '.metrics' \
+            "$RUNNER_TEMP/weaver-evidence/fork-budget.json")"
+          verification_date="$(date -u +%Y-%m-%d)"
+          {
+            echo "## Verified upstream candidate"
+            echo
+            echo "- Release: \`${CANDIDATE_RELEASE}\`"
+            echo "- Upstream commit: \`${CANDIDATE_COMMIT}\`"
+            echo "- Weaver candidate: \`${CANDIDATE_SHA}\`"
+            echo "- Immutable baseline: \`${baseline_branch}\`"
+            echo "- Image digest: \`${IMAGE_DIGEST}\`"
+            echo "- OCI/SBOM/provenance archive: \`${OCI_SHA256}\`"
+            echo "- Authoritative signer: \`vincentkoc@openclaw\`"
+            echo "- Verification environment: \`ubuntu-24.04\` on \`${verification_date}\`"
+            echo "- Evidence and sanitized failure artifacts: ${RUN_URL}"
+            echo "- Limitation: repository/build evidence only; no live ARC or readiness claim"
+            echo
+            echo "## Risk and rollback"
+            echo
+            echo "$inventory_summary"
+            echo "- Fork budget: \`${fork_metrics}\`"
+            echo
+            echo "Review the generated dependency vulnerability report, fork budget,"
+            echo "RuntimeProfile/distribution tests, contract tests, behavior suite, and fresh-clone build."
+            echo "Rollback is a separate protected-lane PR restoring the previous Weaver release commit;"
+            echo "the immutable upstream baseline is never rewritten or deleted."
+            echo
+            echo "## Merge controls"
+            echo
+            echo "- This PR is intentionally draft and was not auto-approved or auto-merged."
+            echo "- A human owner outside the implementation role must review it."
+            echo "- Claim promotion remains blocked pending the exact-environment Evidence Bundle."
+            echo
+            echo "Closes #39 only after the scheduled and negative-path acceptance evidence is reviewed."
+          } > "$body"
+          gh pr create --repo "$REPOSITORY" --base main --head "$CANDIDATE_BRANCH" \
+            --draft --title "chore(upstream): update Weaver to ${CANDIDATE_RELEASE}" \
+            --body-file "$body"

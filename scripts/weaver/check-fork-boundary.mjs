@@ -73,11 +73,44 @@ export function validateForkPolicy(policy) {
     failures.push("upstream must be an object");
   } else {
     requireString(upstream.repository, "upstream.repository", failures);
+    if (
+      !requireString(upstream.stableReleaseApi, "upstream.stableReleaseApi", failures) ||
+      !/^https:\/\/api\.github\.com\/repos\/openclaw\/openclaw\/releases\/latest$/.test(
+        upstream.stableReleaseApi ?? "",
+      )
+    ) {
+      failures.push(
+        "upstream.stableReleaseApi must use the configured OpenClaw latest-release API",
+      );
+    }
+    requireString(upstream.allowedSignersFile, "upstream.allowedSignersFile", failures);
+    if (
+      typeof upstream.allowedSignersFile === "string" &&
+      (upstream.allowedSignersFile.startsWith("/") || upstream.allowedSignersFile.includes(".."))
+    ) {
+      failures.push("upstream.allowedSignersFile must be a repository-relative safe path");
+    }
     requireString(upstream.release, "upstream.release", failures);
     if (!/^[a-f0-9]{40}$/.test(upstream.commit ?? "")) {
       failures.push("upstream.commit must be a full lowercase Git commit");
     }
     parseDate(upstream.releaseDate, "upstream.releaseDate", failures);
+    if (!Array.isArray(upstream.retiredCommits)) {
+      failures.push("upstream.retiredCommits must be an array");
+    } else {
+      const retired = new Set();
+      for (const [index, commit] of upstream.retiredCommits.entries()) {
+        if (typeof commit !== "string" || !/^[a-f0-9]{40}$/.test(commit)) {
+          failures.push(`upstream.retiredCommits[${index}] must be a full lowercase Git commit`);
+        } else if (retired.has(commit)) {
+          failures.push(`upstream.retiredCommits contains duplicate commit ${commit}`);
+        }
+        retired.add(commit);
+      }
+      if (retired.has(upstream.commit)) {
+        failures.push("the pinned upstream commit must not be retired");
+      }
+    }
   }
 
   if (!isRecord(securityReview)) {
@@ -154,8 +187,21 @@ export function validateForkPolicy(policy) {
         )
       ) {
         failures.push(`${kind}[${index}].upstreamIssue must be an OpenClaw issue or pull request`);
+      } else {
+        requireString(entry.reviewedBy, `${kind}[${index}].reviewedBy`, failures);
+        parseDate(entry.reviewedAt, `${kind}[${index}].reviewedAt`, failures);
+        parseDate(entry.reviewDue, `${kind}[${index}].reviewDue`, failures);
+        if (!["open", "accepted", "merged", "rejected"].includes(entry.upstreamDisposition)) {
+          failures.push(
+            `${kind}[${index}].upstreamDisposition must be open, accepted, merged, or rejected`,
+          );
+        }
       }
     }
+  }
+
+  if (Array.isArray(policy.approvedCorePatches) && policy.approvedCorePatches.length > 1) {
+    failures.push("approvedCorePatches permits at most one temporary OpenClaw core patch");
   }
 
   if (!isRecord(budgets)) {
@@ -228,6 +274,24 @@ export function evaluateChangeBudget({ policy, changes, today }) {
     failures,
   );
   const checkDate = parseDate(today, "check date", failures);
+  for (const [index, approval] of policy.approvedCorePatches.entries()) {
+    const patchReviewedAt = parseDate(
+      approval.reviewedAt,
+      `approvedCorePatches[${index}].reviewedAt`,
+      failures,
+    );
+    const reviewDue = parseDate(
+      approval.reviewDue,
+      `approvedCorePatches[${index}].reviewDue`,
+      failures,
+    );
+    if (patchReviewedAt && checkDate && patchReviewedAt > checkDate) {
+      failures.push(`approvedCorePatches[${index}] review date is in the future`);
+    }
+    if (reviewDue && checkDate && reviewDue < checkDate) {
+      failures.push(`approvedCorePatches[${index}] security review is stale`);
+    }
+  }
   const securityReleaseLagDays =
     pinnedDate && latestDate ? Math.max(0, Math.floor((latestDate - pinnedDate) / dayMs)) : 0;
   const securityReviewAgeDays =

@@ -143,7 +143,8 @@ or reusable receipt. Weaver has no parallel approval inbox or v1 reader.
 ## Fork boundary
 
 The initial fork budget permits no core patch and no Weaver-owned plugin. `weaver.fork-policy.json`
-allows only the distribution entry point, these docs, the launch guard, its focused tests, and the
-fork checker. Any future exception must be explicit, bounded, upstream-tracked, owned, and
-removable. A successful fork check is repository-shape evidence only; it proves no live security,
-durability, interoperability, or readiness claim.
+allows only the distribution entry point, these docs, the launch guard, signed-update automation,
+its focused tests, and the fork checker. Any future exception must be explicit, bounded,
+upstream-tracked, security-reviewed, owned, and removable. At most one temporary core patch may
+exist; a second patch or stale review blocks the update. A successful fork check is repository-shape
+evidence only; it proves no live security, durability, interoperability, or readiness claim.
