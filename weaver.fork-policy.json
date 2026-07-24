@@ -36,7 +36,7 @@
   "budgets": {
     "maxChangedFiles": 15,
     "maxChangedCoreFiles": 0,
-    "maxNonPluginPatchLines": 3400,
+    "maxNonPluginPatchLines": 3200,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
   }
