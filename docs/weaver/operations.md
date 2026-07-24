@@ -193,3 +193,26 @@ The fork check is offline and deterministic for a declared `WEAVER_FORK_CHECK_DA
 that value to its UTC build date. It verifies the annotated upstream pin, reviewed security release,
 review freshness, changed paths, plugin/core approvals, and line budgets. Updating the date without
 reviewing upstream releases and advisories is not valid evidence.
+
+## Scheduled upstream updates
+
+`Weaver signed upstream update` runs weekly and by manual dispatch against the stable-release API
+declared in `weaver.fork-policy.json`. It accepts only a published `vYYYY.M.P` release whose
+annotated tag passes both GitHub's immutable tag-object verification and local SSH verification
+against `weaver.upstream-allowed-signers`. A moved tag, prerelease, rollback, retired commit,
+unknown signer, stale patch review, second core patch, vulnerability blocker, or failed gate stops
+before repository mutation.
+
+The read-only verification job rebuilds the distribution delta on the peeled candidate commit and
+records the upstream tag object, commit, URL, verification time, signer, change inventory, fork
+budget, dependency findings, image digest, OCI archive digest, SBOM/provenance presence, and
+fresh-clone build. Evidence artifacts are retained for 30 days and must remain support-safe.
+
+After all gates pass, a separate write-scoped job imports the verified Git bundle without executing
+candidate code. It creates `upstream/<version>-base` once, refuses to rewrite either the baseline or
+an orphaned candidate branch, and opens one draft `automation/upstream-<version>` pull request.
+An existing open PR makes repeat delivery a no-op. Human review, merge, deployment, release tagging,
+and claim promotion remain separate protected actions.
+
+Rollback is another reviewed pull request that restores the previous Weaver release commit. Never
+force-push or delete an immutable upstream baseline to perform rollback.

@@ -2,9 +2,12 @@
   "schemaVersion": 1,
   "upstream": {
     "repository": "https://github.com/openclaw/openclaw",
+    "stableReleaseApi": "https://api.github.com/repos/openclaw/openclaw/releases/latest",
+    "allowedSignersFile": "weaver.upstream-allowed-signers",
     "release": "v2026.7.1",
     "commit": "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4",
-    "releaseDate": "2026-07-13"
+    "releaseDate": "2026-07-13",
+    "retiredCommits": []
   },
   "securityReview": {
     "reviewedAt": "2026-07-19",
@@ -14,6 +17,7 @@
   },
   "distributionPaths": [
     ".github/workflows/weaver-distribution.yml",
+    ".github/workflows/weaver-upstream-update.yml",
     "README.md",
     "UPSTREAM.md",
     "docs/.i18n/glossary.zh-CN.json",
@@ -22,15 +26,17 @@
     "package.json",
     "scripts/weaver/check-fork-boundary.mjs",
     "scripts/weaver/launch-from-runtime-profile.mjs",
+    "scripts/weaver/prepare-upstream-update.mjs",
     "test/scripts/weaver-distribution-seams.test.ts",
-    "weaver.fork-policy.json"
+    "weaver.fork-policy.json",
+    "weaver.upstream-allowed-signers"
   ],
   "approvedPlugins": [],
   "approvedCorePatches": [],
   "budgets": {
-    "maxChangedFiles": 12,
+    "maxChangedFiles": 15,
     "maxChangedCoreFiles": 0,
-    "maxNonPluginPatchLines": 2250,
+    "maxNonPluginPatchLines": 3400,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
   }

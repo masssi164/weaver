@@ -20,6 +20,12 @@ import {
   validateProjectedConfig,
   validateProjectionEnvelope,
 } from "../../scripts/weaver/launch-from-runtime-profile.mjs";
+import {
+  buildCandidatePolicy,
+  buildChangeInventory,
+  compareStableReleaseVersions,
+  validateReleaseDiscovery,
+} from "../../scripts/weaver/prepare-upstream-update.mjs";
 
 const workspace = "/run/weaver/cell/workspace";
 const secretRef = { source: "env", provider: "default", id: "MATRIX_ACCESS_TOKEN" };
@@ -43,9 +49,12 @@ function validPolicy() {
     schemaVersion: 1,
     upstream: {
       repository: "https://github.com/openclaw/openclaw",
+      stableReleaseApi: "https://api.github.com/repos/openclaw/openclaw/releases/latest",
+      allowedSignersFile: "weaver.upstream-allowed-signers",
       release: "v2026.7.1",
       commit: "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4",
       releaseDate: "2026-07-13",
+      retiredCommits: [],
     },
     securityReview: {
       reviewedAt: "2026-07-19",
@@ -216,5 +225,202 @@ describe("fork budget", () => {
       } as never,
     ];
     expect(validateForkPolicy(policy).join("\n")).toMatch(/upstreamIssue/);
+  });
+
+  it("allows at most one current, fully owned temporary core patch", () => {
+    const policy = validPolicy();
+    const approval = {
+      path: "src/agents/run.ts",
+      owner: "runtime-owner",
+      removalCriterion: "Remove when upstream exposes the required seam.",
+      maxPatchLines: 10,
+      upstreamIssue: "https://github.com/openclaw/openclaw/issues/123",
+      reviewedBy: "security-owner",
+      reviewedAt: "2026-07-18",
+      reviewDue: "2026-08-01",
+      upstreamDisposition: "open",
+    };
+    policy.approvedCorePatches = [approval] as never;
+    policy.budgets.maxChangedCoreFiles = 1;
+    expect(
+      evaluateChangeBudget({
+        policy,
+        changes: [{ path: "src/agents/run.ts", added: 1, deleted: 0, binary: false }],
+        today: "2026-07-19",
+      }).failures,
+    ).toEqual([]);
+
+    policy.approvedCorePatches.push({ ...approval, path: "src/agents/other.ts" } as never);
+    expect(validateForkPolicy(policy)).toContain(
+      "approvedCorePatches permits at most one temporary OpenClaw core patch",
+    );
+
+    policy.approvedCorePatches = [{ ...approval, reviewDue: "2026-07-18" }] as never;
+    expect(
+      evaluateChangeBudget({
+        policy,
+        changes: [{ path: "src/agents/run.ts", added: 1, deleted: 0, binary: false }],
+        today: "2026-07-19",
+      }).failures,
+    ).toContain("approvedCorePatches[0] security review is stale");
+  });
+});
+
+describe("signed stable upstream discovery", () => {
+  function releaseFixture(overrides = {}) {
+    return {
+      draft: false,
+      prerelease: false,
+      tag_name: "v2026.7.2",
+      published_at: "2026-07-20T12:00:00Z",
+      html_url: "https://github.com/openclaw/openclaw/releases/tag/v2026.7.2",
+      ...overrides,
+    };
+  }
+
+  function tagRefFixture(overrides = {}) {
+    return {
+      ref: "refs/tags/v2026.7.2",
+      object: {
+        type: "tag",
+        sha: "a".repeat(40),
+      },
+      ...overrides,
+    };
+  }
+
+  function tagObjectFixture(overrides = {}) {
+    return {
+      sha: "a".repeat(40),
+      tag: "v2026.7.2",
+      object: {
+        type: "commit",
+        sha: "b".repeat(40),
+      },
+      verification: {
+        verified: true,
+        reason: "valid",
+        signature: "signed",
+        verified_at: "2026-07-20T12:01:00Z",
+      },
+      ...overrides,
+    };
+  }
+
+  it("accepts a newer signed stable annotated release and updates the policy pin", () => {
+    const policy = validPolicy();
+    const evidence = validateReleaseDiscovery({
+      policy,
+      release: releaseFixture(),
+      tagRef: tagRefFixture(),
+      tagObject: tagObjectFixture(),
+    });
+    expect(evidence).toMatchObject({
+      updateAvailable: true,
+      release: "v2026.7.2",
+      tagObject: "a".repeat(40),
+      commit: "b".repeat(40),
+    });
+    const candidate = buildCandidatePolicy(policy, evidence, "2026-07-21");
+    expect(candidate.upstream.commit).toBe("b".repeat(40));
+    expect(candidate.securityReview.reviewedAt).toBe("2026-07-21");
+  });
+
+  it("is idempotent for the exact pin and fails closed on mutable or unsafe releases", () => {
+    const policy = validPolicy();
+    const currentRef = tagRefFixture({
+      ref: "refs/tags/v2026.7.1",
+      object: { type: "tag", sha: "c".repeat(40) },
+    });
+    const currentObject = tagObjectFixture({
+      sha: "c".repeat(40),
+      tag: "v2026.7.1",
+      object: { type: "commit", sha: policy.upstream.commit },
+    });
+    expect(
+      validateReleaseDiscovery({
+        policy,
+        release: releaseFixture({
+          tag_name: "v2026.7.1",
+          published_at: "2026-07-13T22:33:14Z",
+          html_url: "https://github.com/openclaw/openclaw/releases/tag/v2026.7.1",
+        }),
+        tagRef: currentRef,
+        tagObject: currentObject,
+      }).updateAvailable,
+    ).toBe(false);
+
+    expect(() =>
+      validateReleaseDiscovery({
+        policy,
+        release: releaseFixture({ prerelease: true }),
+        tagRef: tagRefFixture(),
+        tagObject: tagObjectFixture(),
+      }),
+    ).toThrow(/non-prerelease/);
+    expect(() =>
+      validateReleaseDiscovery({
+        policy,
+        release: releaseFixture(),
+        tagRef: tagRefFixture(),
+        tagObject: tagObjectFixture({
+          verification: { verified: false, reason: "unsigned", signature: null },
+        }),
+      }),
+    ).toThrow(/valid signed annotated tag/);
+    expect(() =>
+      validateReleaseDiscovery({
+        policy,
+        release: releaseFixture({
+          tag_name: "v2026.7.0",
+          html_url: "https://github.com/openclaw/openclaw/releases/tag/v2026.7.0",
+        }),
+        tagRef: tagRefFixture({ ref: "refs/tags/v2026.7.0" }),
+        tagObject: tagObjectFixture({ tag: "v2026.7.0" }),
+      }),
+    ).toThrow(/rolls back/);
+
+    expect(() =>
+      validateReleaseDiscovery({
+        policy,
+        release: releaseFixture({
+          tag_name: "v2026.7.1",
+          published_at: "2026-07-13T22:33:14Z",
+          html_url: "https://github.com/openclaw/openclaw/releases/tag/v2026.7.1",
+        }),
+        tagRef: currentRef,
+        tagObject: { ...currentObject, object: { type: "commit", sha: "d".repeat(40) } },
+      }),
+    ).toThrow(/moved/);
+
+    policy.upstream.retiredCommits = ["b".repeat(40)];
+    expect(() =>
+      validateReleaseDiscovery({
+        policy,
+        release: releaseFixture(),
+        tagRef: tagRefFixture(),
+        tagObject: tagObjectFixture(),
+      }),
+    ).toThrow(/retired/);
+  });
+
+  it("compares stable versions numerically and inventories security-sensitive surfaces", () => {
+    expect(compareStableReleaseVersions("v2026.7.10", "v2026.7.2")).toBe(1);
+    expect(() => compareStableReleaseVersions("v2026.7.2-beta.1", "v2026.7.1")).toThrow(/stable/);
+    expect(
+      buildChangeInventory([
+        "package.json",
+        ".github/workflows/ci.yml",
+        "src/plugins/loader.ts",
+        "schemas/runtime.json",
+        "src/agents/run.ts",
+      ]).groups,
+    ).toEqual({
+      "inherited-workflows": [".github/workflows/ci.yml"],
+      "security-sensitive-dependencies": ["package.json"],
+      "plugin-runtime-seams": ["src/plugins/loader.ts"],
+      schemas: ["schemas/runtime.json"],
+      "upstream-runtime": ["src/agents/run.ts"],
+    });
   });
 });

@@ -15,7 +15,8 @@ independent agent-runtime implementation.
 
 The baseline is recorded again in `weaver.fork-policy.json` so CI can verify the annotated tag,
 commit, review age, security-release lag, changed paths, and patch budget without relying on a
-moving branch.
+moving branch. `weaver.upstream-allowed-signers` is the reviewed SSH allowed-signers policy; GitHub
+release metadata is corroborating evidence and cannot authorize a tag by itself.
 
 ## Inherited behavior
 
@@ -41,10 +42,11 @@ The permitted distribution delta is deliberately small:
 - a machine-readable fork policy and deterministic checker;
 - focused tests for those distribution seams.
 
-No core patch is approved in the initial policy. A future core patch must name its owner, an
-upstream OpenClaw issue or pull request, a per-file line limit, and an objective removal criterion.
-Adding a plugin likewise requires an explicit policy entry; placing code under `extensions/` does
-not automatically exempt it from the fork budget.
+No core patch is approved in the initial policy. A future temporary core patch must name its owner,
+reviewer, review and due dates, upstream OpenClaw issue or pull request, upstream disposition,
+per-file line limit, and objective removal criterion. A second core patch or a stale review fails
+closed. Adding a plugin likewise requires an explicit policy entry; placing code under
+`extensions/` does not automatically exempt it from the fork budget.
 
 ## Downstream automation
 
@@ -62,6 +64,14 @@ later reviewed policy explicitly adopts them. Inherited publishing, deployment, 
 external-service, and live-transport workflows are not Weaver release authority and remain
 unrequired; missing upstream credentials or unavailable runners never become a release waiver.
 Issue #37 owns the settings inventory and quarantine record.
+
+`Weaver signed upstream update` scans the configured stable channel every Tuesday and supports
+manual dispatch. Candidate code runs in a read-only job without repository or product credentials.
+Only after signature, fork, projection, contract, behavior, build, vulnerability, SBOM, provenance,
+and fresh-clone gates pass does a separate job create the immutable `upstream/<version>-base`
+reference and one draft update pull request. That credentialed job does not execute candidate code.
+Repeated scans reuse an open update PR and never rewrite a baseline. The workflow never approves,
+merges, deploys, publishes, changes the default branch, or promotes a readiness claim.
 
 ## Upgrade procedure
 
