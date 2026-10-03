@@ -1,6 +1,5 @@
 // Hook frontmatter helpers parse metadata blocks from hook files.
 import { readStringValue } from "@openclaw/normalization-core/string-coerce";
-import { parseFrontmatterBlock } from "../../packages/markdown-core/src/frontmatter.js";
 import {
   applyOpenClawManifestInstallCommonFields,
   getFrontmatterString,
@@ -20,10 +19,7 @@ import type {
   ParsedHookFrontmatter,
 } from "./types.js";
 
-/** Parse HOOK.md frontmatter into the generic hook frontmatter record. */
-export function parseFrontmatter(content: string): ParsedHookFrontmatter {
-  return parseFrontmatterBlock(content);
-}
+export { parseFrontmatterBlock as parseHookFrontmatter } from "../../packages/markdown-core/src/frontmatter.js";
 
 function parseInstallSpec(input: unknown): HookInstallSpec | undefined {
   const parsed = parseOpenClawManifestInstallBase(input, ["bundled", "npm", "git"]);
@@ -48,7 +44,7 @@ function parseInstallSpec(input: unknown): HookInstallSpec | undefined {
 }
 
 /** Resolve OpenClaw hook metadata from the manifest block in HOOK.md frontmatter. */
-export function resolveOpenClawMetadata(
+export function resolveHookManifestMetadata(
   frontmatter: ParsedHookFrontmatter,
 ): OpenClawHookMetadata | undefined {
   const metadataObj = resolveOpenClawManifestBlock({ frontmatter });
@@ -58,7 +54,6 @@ export function resolveOpenClawMetadata(
   const requires = resolveOpenClawManifestRequires(metadataObj);
   const install = resolveOpenClawManifestInstall(metadataObj, parseInstallSpec);
   const osRaw = resolveOpenClawManifestOs(metadataObj);
-  const eventsRaw = normalizeStringList(metadataObj.events);
   return {
     always: typeof metadataObj.always === "boolean" ? metadataObj.always : undefined,
     emoji: readStringValue(metadataObj.emoji),
@@ -66,7 +61,7 @@ export function resolveOpenClawMetadata(
     hookKey: readStringValue(metadataObj.hookKey),
     export: readStringValue(metadataObj.export),
     os: osRaw.length > 0 ? osRaw : undefined,
-    events: eventsRaw.length > 0 ? eventsRaw : [],
+    events: normalizeStringList(metadataObj.events),
     requires,
     install: install.length > 0 ? install : undefined,
   };
@@ -82,6 +77,6 @@ export function resolveHookInvocationPolicy(
 }
 
 /** Resolve the config key for a hook, honoring metadata hookKey overrides. */
-export function resolveHookKey(hookName: string, entry?: HookEntry): string {
+export function resolveHookKey(hookName: string, entry?: Pick<HookEntry, "metadata">): string {
   return entry?.metadata?.hookKey ?? hookName;
 }

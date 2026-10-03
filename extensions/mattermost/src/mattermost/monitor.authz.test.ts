@@ -1,5 +1,10 @@
 // Mattermost tests cover monitor.authz plugin behavior.
-import { describe, expect, it } from "vitest";
+import "./monitor-helpers.test-support.js";
+import "./monitor-onchar.test-support.js";
+import "./monitor.channel-kind.test-support.js";
+import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
+import { beforeEach, describe, expect, it } from "vitest";
+import { setMattermostRuntime } from "../runtime.js";
 import type { ResolvedMattermostAccount } from "./accounts.js";
 import {
   authorizeMattermostCommandInvocation,
@@ -26,11 +31,7 @@ function authorizeGroupCommand(senderId: string) {
         allowFrom: ["trusted-user"],
       },
     },
-    cfg: {
-      commands: {
-        useAccessGroups: true,
-      },
-    },
+    cfg: {},
     senderId,
     senderName: senderId,
     channelId: "chan-1",
@@ -47,6 +48,10 @@ function authorizeGroupCommand(senderId: string) {
 }
 
 describe("mattermost monitor authz", () => {
+  beforeEach(() => {
+    setMattermostRuntime(createPluginRuntimeMock());
+  });
+
   it("keeps DM allowlist merged with pairing-store entries", async () => {
     const resolved = await resolveMattermostMonitorInboundAccess({
       account: {
@@ -123,11 +128,7 @@ describe("mattermost monitor authz", () => {
           dmPolicy: "open",
         },
       },
-      cfg: {
-        commands: {
-          useAccessGroups: true,
-        },
-      },
+      cfg: {},
       senderId: "alice",
       senderName: "Alice",
       channelId: "dm-1",
@@ -234,9 +235,6 @@ describe("mattermost monitor authz", () => {
         },
       },
       cfg: {
-        commands: {
-          useAccessGroups: true,
-        },
         accessGroups: {
           oncall: {
             type: "message.senders",

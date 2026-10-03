@@ -1,31 +1,17 @@
 // Defines hook-related Zod schema fragments for config parsing.
 import path from "node:path";
 import { z } from "zod";
-import { InstallRecordShape } from "./zod-schema.installs.js";
 import { sensitive } from "./zod-schema.sensitive.js";
 
 function isSafeRelativeModulePath(raw: string): boolean {
   const value = raw.trim();
-  if (!value) {
-    return false;
-  }
   // Hook modules are loaded via file-path resolution + dynamic import().
   // Keep this strictly relative to a configured base dir to avoid path traversal and surprises.
-  if (path.isAbsolute(value)) {
+  // Colons also disallow URL-ish and drive-relative forms (e.g. "file:...", "C:foo").
+  if (!value || path.isAbsolute(value) || value.startsWith("~") || value.includes(":")) {
     return false;
   }
-  if (value.startsWith("~")) {
-    return false;
-  }
-  // Disallow URL-ish and drive-relative forms (e.g. "file:...", "C:foo").
-  if (value.includes(":")) {
-    return false;
-  }
-  const parts = value.split(/[\\/]+/g);
-  if (parts.some((part) => part === "..")) {
-    return false;
-  }
-  return true;
+  return !value.split(/[\\/]+/g).some((part) => part === "..");
 }
 
 const SafeRelativeModulePathSchema = z
@@ -46,8 +32,13 @@ export const HookMappingSchema = z
     name: z.string().optional(),
     agentId: z.string().optional(),
     sessionKey: z.string().optional().register(sensitive),
+    sessionMode: z.union([z.literal("isolated"), z.literal("persistent")]).optional(),
     messageTemplate: z.string().optional(),
     textTemplate: z.string().optional(),
+    forEach: z
+      .string()
+      .regex(/^[^.[\]]+$/, "forEach must be a top-level payload key")
+      .optional(),
     deliver: z.boolean().optional(),
     allowUnsafeExternalContent: z.boolean().optional(),
     // Keep this open-ended so runtime channel plugins (for example feishu) can be
@@ -69,13 +60,7 @@ export const HookMappingSchema = z
   .strict()
   .optional();
 
-const InternalHookHandlerSchema = z
-  .object({
-    event: z.string(),
-    module: SafeRelativeModulePathSchema,
-    export: z.string().optional(),
-  })
-  .strict();
+export type HookMappingConfigInput = NonNullable<z.input<typeof HookMappingSchema>>;
 
 const HookConfigSchema = z
   .object({
@@ -87,17 +72,9 @@ const HookConfigSchema = z
   // whole config invalid (which triggers doctor/best-effort loads).
   .passthrough();
 
-const HookInstallRecordSchema = z
-  .object({
-    ...InstallRecordShape,
-    hooks: z.array(z.string()).optional(),
-  })
-  .strict();
-
 export const InternalHooksSchema = z
   .object({
     enabled: z.boolean().optional(),
-    handlers: z.array(InternalHookHandlerSchema).optional(),
     entries: z.record(z.string(), HookConfigSchema).optional(),
     load: z
       .object({
@@ -105,10 +82,11 @@ export const InternalHooksSchema = z
       })
       .strict()
       .optional(),
-    installs: z.record(z.string(), HookInstallRecordSchema).optional(),
   })
   .strict()
   .optional();
+
+export type InternalHooksConfigInput = NonNullable<z.input<typeof InternalHooksSchema>>;
 
 export const HooksGmailSchema = z
   .object({
@@ -151,3 +129,5 @@ export const HooksGmailSchema = z
   })
   .strict()
   .optional();
+
+export type HooksGmailConfigInput = NonNullable<z.input<typeof HooksGmailSchema>>;

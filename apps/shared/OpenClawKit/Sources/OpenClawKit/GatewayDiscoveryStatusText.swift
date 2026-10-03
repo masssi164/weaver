@@ -2,37 +2,47 @@ import Foundation
 import Network
 
 public enum GatewayDiscoveryStatusText {
+    public static var idle: String {
+        String(localized: "Idle")
+    }
+
+    public static var stopped: String {
+        String(localized: "Stopped")
+    }
+
     public static func make(states: [NWBrowser.State], hasBrowsers: Bool) -> String {
         if states.isEmpty {
-            return hasBrowsers ? "Setup" : "Idle"
+            return hasBrowsers ? String(localized: "Setup") : self.idle
         }
 
-        if let failed = states.first(where: { state in
-            if case .failed = state { return true }
-            return false
-        }) {
-            if case let .failed(err) = failed {
-                return "Failed: \(err)"
+        for case let .failed(err) in states {
+            return "\(String(localized: "Failed")): \(err)"
+        }
+
+        for case let .waiting(err) in states {
+            return "\(String(localized: "Waiting")): \(err)"
+        }
+
+        if states.contains(where: {
+            if case .ready = $0 {
+                true
+            } else {
+                false
             }
-        }
-
-        if let waiting = states.first(where: { state in
-            if case .waiting = state { return true }
-            return false
         }) {
-            if case let .waiting(err) = waiting {
-                return "Waiting: \(err)"
+            return String(localized: "Searching…")
+        }
+
+        if states.contains(where: {
+            if case .setup = $0 {
+                true
+            } else {
+                false
             }
+        }) {
+            return String(localized: "Setup")
         }
 
-        if states.contains(where: { if case .ready = $0 { true } else { false } }) {
-            return "Searching…"
-        }
-
-        if states.contains(where: { if case .setup = $0 { true } else { false } }) {
-            return "Setup"
-        }
-
-        return "Searching…"
+        return String(localized: "Searching…")
     }
 }

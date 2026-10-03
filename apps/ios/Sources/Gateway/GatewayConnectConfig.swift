@@ -9,7 +9,7 @@ import OpenClawKit
 ///
 /// Both sessions derive routing and authentication ownership from the route's
 /// `stableID`. TLS certificate pins prove transport trust but are not gateway identity.
-struct GatewayConnectConfig {
+struct GatewayConnectConfig: Sendable {
     let url: URL
     let stableID: String
     let tls: GatewayTLSParams?
@@ -21,33 +21,57 @@ struct GatewayConnectConfig {
     /// Stable, non-empty route identifier used for UI/event ownership.
     /// If the caller doesn't provide a stableID, fall back to URL identity.
     var effectiveStableID: String {
-        let trimmed = self.stableID.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return self.url.absoluteString }
-        return trimmed
+        GatewayStableIdentifier.exact(self.stableID) ?? self.url.absoluteString
+    }
+
+    struct ControlUIInputs: Hashable, Sendable {
+        let url: URL
+        let stableID: ExactOpaqueIdentifierKey
+        let tlsRequired: Bool?
+        let tlsExpectedFingerprint: String?
+        let tlsAllowTOFU: Bool?
+        let tlsStoreKey: String?
+        let token: String?
+        let password: String?
+        let clientId: String
+        let includeDeviceIdentity: Bool
+        let allowStoredDeviceAuth: Bool
+        let deviceIdentityProfile: String
+        let deviceAuthGatewayID: ExactOpaqueIdentifierKey
+    }
+
+    /// Control UI authentication does not consume node registration metadata.
+    /// Keep bridge authority and WebView replacement on these same inputs.
+    var controlUIInputs: ControlUIInputs {
+        ControlUIInputs(
+            url: self.url,
+            stableID: ExactOpaqueIdentifierKey(self.effectiveStableID),
+            tlsRequired: self.tls?.required,
+            tlsExpectedFingerprint: self.tls?.expectedFingerprint,
+            tlsAllowTOFU: self.tls?.allowTOFU,
+            tlsStoreKey: self.tls?.storeKey,
+            token: self.token,
+            password: self.password,
+            clientId: self.nodeOptions.clientId,
+            includeDeviceIdentity: self.nodeOptions.includeDeviceIdentity,
+            allowStoredDeviceAuth: self.nodeOptions.allowStoredDeviceAuth,
+            deviceIdentityProfile: self.nodeOptions.deviceIdentityProfile.rawValue,
+            deviceAuthGatewayID: ExactOpaqueIdentifierKey(
+                self.nodeOptions.deviceAuthGatewayID ?? self.effectiveStableID))
+    }
+
+    func hasSameControlUIInputs(as other: GatewayConnectConfig) -> Bool {
+        self.controlUIInputs == other.controlUIInputs
     }
 
     func hasSameConnectionInputs(as other: GatewayConnectConfig) -> Bool {
         self.url == other.url &&
-            self.stableID == other.stableID &&
-            Self.sameTLS(self.tls, other.tls) &&
+            ExactOpaqueIdentifierKey(self.effectiveStableID) == ExactOpaqueIdentifierKey(other.effectiveStableID) &&
+            self.tls == other.tls &&
             self.token == other.token &&
             self.bootstrapToken == other.bootstrapToken &&
             self.password == other.password &&
             Self.sameOptions(self.nodeOptions, other.nodeOptions)
-    }
-
-    private static func sameTLS(_ lhs: GatewayTLSParams?, _ rhs: GatewayTLSParams?) -> Bool {
-        switch (lhs, rhs) {
-        case (nil, nil):
-            true
-        case let (lhs?, rhs?):
-            lhs.required == rhs.required &&
-                lhs.expectedFingerprint == rhs.expectedFingerprint &&
-                lhs.allowTOFU == rhs.allowTOFU &&
-                lhs.storeKey == rhs.storeKey
-        default:
-            false
-        }
     }
 
     private static func sameOptions(_ lhs: GatewayConnectOptions, _ rhs: GatewayConnectOptions) -> Bool {
@@ -65,7 +89,8 @@ struct GatewayConnectConfig {
             lhs.deviceIdentityProfile == rhs.deviceIdentityProfile &&
             lhs.includeDeviceIdentity == rhs.includeDeviceIdentity &&
             lhs.allowStoredDeviceAuth == rhs.allowStoredDeviceAuth &&
-            lhs.deviceAuthGatewayID == rhs.deviceAuthGatewayID &&
+            lhs.deviceAuthGatewayID.map(ExactOpaqueIdentifierKey.init) ==
+            rhs.deviceAuthGatewayID.map(ExactOpaqueIdentifierKey.init) &&
             lhsScopes == rhsScopes &&
             lhsCaps == rhsCaps &&
             lhsCommands == rhsCommands &&

@@ -1,42 +1,34 @@
 # Weaver
 
-Weaver is the Weave-governed distribution of
-[OpenClaw](https://github.com/openclaw/openclaw). It runs one disposable personal agent cell for
-each currently entitled Weave member while preserving OpenClaw's upstream agent loop, sessions,
-official Matrix plugin, MCP client, skills, memory, and native approval lifecycle.
+Weaver is the Weave-governed distribution of [OpenClaw](https://github.com/openclaw/openclaw).
+It preserves the upstream agent runtime and supplies the narrow launch and distribution boundary
+for a personal agent cell assigned to an entitled Weave member.
 
-This branch is based directly on the annotated OpenClaw release `v2026.7.1` at commit
-`2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4`. The Weaver layer is intentionally limited to
-distribution documentation, a fail-closed RuntimeProfile launch guard, and a deterministic fork
-budget. See [UPSTREAM.md](UPSTREAM.md) for provenance and upgrade rules.
+The current candidate is reconstructed from signed OpenClaw **v2026.9.8**, commit
+`fc23bc864e4553c2d215e479eeec47b67a0bf943`. See [UPSTREAM.md](UPSTREAM.md) for the exact provenance,
+upgrade procedure, and unchanged-runtime policy.
 
-> **Status:** target architecture with an executable bootstrap guard. Cross-node reconstruction,
-> production Kubernetes/gVisor isolation, live Matrix E2EE, workload MCP authorization, backup and
-> restore, accessibility, and chaos evidence are not yet complete. This repository does not claim
-> production readiness or a proven zero-durable-byte cell.
+> **Status:** target architecture with an executable RuntimeProfile bootstrap guard. A passing
+> distribution check proves neither production readiness nor live Weave integration. Cross-node
+> reconstruction, Kubernetes/gVisor isolation, Matrix E2EE recovery, workload MCP authorization,
+> backup/restore, accessibility, and chaos evidence remain separate acceptance requirements.
 
 ## Product boundary
 
-- **Keycloak** is Weave's identity backbone, federation broker, and entitlement authority.
-- **Agent Runtime Control** issues signed, short-lived RuntimeProfiles and owns cell lifecycle,
-  leases, fencing, revocation, and support-safe correlation.
-- **OpenClaw** owns the runtime: agent execution, official Matrix integration, MCP consumption,
-  sessions, memory/skills, and approvals.
-- **Weave domains** reauthorize every MCP side effect using the server-resolved member binding and
-  the authenticated per-cell workload identity.
-  Neither a RuntimeProfile nor an OpenClaw approval grants a domain permission.
+- **Keycloak** owns Weave identity, federation, and entitlement.
+- **Agent Runtime Control** owns signed RuntimeProfiles, lifecycle, leases, fencing, and revocation.
+- **OpenClaw** owns the agent loop, Matrix plugin, MCP client, sessions, skills, memory, and approvals.
+- **Weave domains** independently authorize every side effect against current member and workload rights.
 
-Weaver does not carry a custom agent loop, Matrix channel, approval engine, MCP protocol, or
-memory/skill engine. External identity providers connect upstream of Keycloak; they do not replace
-the Weave identity boundary.
+A RuntimeProfile and an OpenClaw approval are not domain permissions. Weaver does not implement a
+second agent loop, Matrix channel, approval engine, identity system, or data plane.
 
-## Runtime startup
+## Managed startup
 
-A managed Weaver cell must start through the RuntimeProfile guard, never through interactive
-OpenClaw onboarding or a hand-written member configuration:
+Use the unchanged RuntimeProfile guard instead of interactive onboarding:
 
 ```bash
-pnpm weaver:launch -- \
+node scripts/weaver/launch-from-runtime-profile.mjs \
   --profile /run/weaver/input/runtime-profile.json \
   --projector /usr/local/bin/weave-runtime-profile-projector \
   --ephemeral-root /run/weaver/cell \
@@ -48,64 +40,48 @@ pnpm weaver:launch -- \
   -- gateway
 ```
 
-The orchestrator-selected projector verifies the signed RuntimeProfile and emits a stock OpenClaw
-configuration. The guard independently binds that result to the exact signed-envelope bytes and
-the orchestrator-selected cell/client, rejects raw credentials, non-Matrix channels,
-non-ephemeral paths, v1 projections, and failed or missing verification, then launches upstream
-OpenClaw with fixed config and state paths.
+The trusted projector must verify the signed profile. The guard binds its result to the exact
+profile bytes and cell, rejects literal credentials, additional channels, unsafe paths and missing
+verification, and launches the stock upstream gateway with explicit config and state paths.
 
-RuntimeProfile v2 requires per-cell Keycloak `client_credentials` at MCP. OpenClaw `v2026.7.1`
-supports interactive MCP OAuth but not the pinned client-credentials extension, so the guard
-requires MCP to remain absent and explicitly disabled. It will not silently substitute a human
-OAuth flow, static header, or shared service account. See
-[Weaver operations](docs/weaver/operations.md) for the temporary projector protocol.
+**MCP remains disabled in managed Weaver cells.** Updating OpenClaw does not itself prove the ARC
+client-credentials, token exchange and current-domain-authorization contract. No human OAuth,
+shared credentials or static-header fallback is enabled by this update.
 
-## Architecture
+The four external durability authorities remain the Control Store, immutable WebDAV Workspace
+Store, encrypted Runtime State Store and Secret Broker. Local container files are not canonical
+state. Read [Architecture](docs/weaver/architecture.md) and [Operations](docs/weaver/operations.md).
 
-Durability is external to the cell:
+## Development and verification
 
-- Control Store: desired state, lease/fencing epoch, workspace HEAD, wake dedupe, conflicts, and
-  audit correlation;
-- Workspace Store: immutable, signed WebDAV workspace revisions;
-- Runtime State Store: encrypted, complete OpenClaw state generations;
-- Secret Broker: short-lived Matrix, model, storage, and encryption credentials.
-
-Local dogfood uses a Docker cell-orchestrator adapter. The production evidence target is Kubernetes
-with gVisor behind the same port. Neither adapter may turn a pod/container volume into canonical
-state.
-
-Read [Weaver architecture](docs/weaver/architecture.md) and
-[Weaver operations](docs/weaver/operations.md) before changing runtime or deployment behavior.
-
-## Development gates
-
-Use the pinned package manager and supported Node release from `package.json`.
+Use the Node engine and pinned pnpm version in the unchanged upstream `package.json`.
+The v2026.9.8 update removes the three downstream package-script aliases; invoke their existing
+implementations directly instead. This keeps upstream package metadata and lockfiles byte-identical.
 
 ```bash
+corepack enable
+pnpm install --frozen-lockfile --ignore-scripts
+node scripts/weaver/check-fork-boundary.mjs
+pnpm exec vitest run --config scripts/weaver/vitest.config.mjs
+pnpm audit --prod --audit-level high
 pnpm build
-pnpm check:weaver-fork
-pnpm test:weaver-distribution
-pnpm format:docs:check
-node scripts/check-docs-mdx.mjs docs/weaver README.md UPSTREAM.md
 git diff --check
 ```
 
-`pnpm check:weaver-fork` fails when the upstream tag or commit moves, the security review becomes
-stale, the changed-file/line budget is exceeded, an undeclared plugin appears, or a core patch lacks
-an owner, upstream issue, bounded line budget, and removal criterion.
+The dedicated test config runs the complete existing Weaver seam suite; it does not disable an
+upstream test or replace upstream release validation. The required distribution workflow also
+checks signed-tag provenance, unchanged upstream runtime/dependency inputs and review freshness.
 
-## Upstream documentation and license
+## Upstream documentation and licence
 
-Weaver inherits the upstream OpenClaw documentation in `docs/`. Use the
-[OpenClaw documentation](https://docs.openclaw.ai) for upstream CLI, configuration, Matrix, MCP,
-plugin, and runtime behavior. Weaver deployment policy in `docs/weaver/` is narrower and takes
-precedence for managed cells.
+Use [OpenClaw documentation](https://docs.openclaw.ai) for upstream behavior. Weaver deployment
+requirements are documented separately and are narrower than a general-purpose OpenClaw install.
 
-OpenClaw is MIT-licensed. The upstream copyright and license remain in [LICENSE](LICENSE), and
-incorporated third-party notices remain in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The root [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) retain OpenClaw's
+MIT terms and incorporated third-party notices. Original Weaver-owned material is licensed under
+**EUPL-1.2-or-later**, with the exact scope and full licence text in
+[Weaver licensing](docs/weaver/licensing.md). Earlier licence grants are not revoked.
 
-The original Weaver-owned layer is **EUPL-1.2-or-later**, copyright © 2026 Massimo (GitHub: masssi164).
-See [Weaver licensing](docs/weaver/licensing.md) for the exact scope and
-[the EUPL text](docs/weaver/LICENSE-EUPL-1.2.txt). Earlier licence grants are not revoked.
-[Weaver contribution guidance](docs/weaver/contributing.md) covers DCO sign-off and disclosed
-AI-assisted work. Upstream-oriented contributions retain their applicable upstream licence.
+Contributions follow the applicable MIT/EUPL boundary and
+[Weaver DCO guidance](docs/weaver/contributing.md). AI-assisted work and communication are welcome
+with appropriate disclosure and human responsibility.

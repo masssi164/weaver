@@ -1,15 +1,10 @@
-// Discord plugin module implements resolve users behavior.
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { fetchDiscord } from "./api.js";
+import { DISCORD_DIRECTORY_LOOKUP_TIMEOUT_MS, fetchDiscord } from "./api.js";
 import { listGuilds, type DiscordGuildSummary } from "./guilds.js";
-import {
-  buildDiscordUnresolvedResults,
-  filterDiscordGuilds,
-  resolveDiscordAllowlistToken,
-} from "./resolve-allowlist-common.js";
+import { filterDiscordGuilds, resolveDiscordAllowlistToken } from "./resolve-allowlist-common.js";
 
 type DiscordUser = {
   id: string;
@@ -93,7 +88,7 @@ export async function resolveDiscordUserAllowlist(params: {
 }): Promise<DiscordUserResolution[]> {
   const token = resolveDiscordAllowlistToken(params.token);
   if (!token) {
-    return buildDiscordUnresolvedResults(params.entries, (input) => ({
+    return params.entries.map((input) => ({
       input,
       resolved: false,
     }));
@@ -106,7 +101,9 @@ export async function resolveDiscordUserAllowlist(params: {
   let guilds: DiscordGuildSummary[] | null = null;
   const getGuilds = async (): Promise<DiscordGuildSummary[]> => {
     if (!guilds) {
-      guilds = await listGuilds(token, fetcher);
+      guilds = await listGuilds(token, fetcher, {
+        timeoutMs: DISCORD_DIRECTORY_LOOKUP_TIMEOUT_MS,
+      });
     }
     return guilds;
   };
@@ -148,6 +145,7 @@ export async function resolveDiscordUserAllowlist(params: {
         `/guilds/${guild.id}/members/search?${paramsObj.toString()}`,
         token,
         fetcher,
+        { timeoutMs: DISCORD_DIRECTORY_LOOKUP_TIMEOUT_MS },
       );
       for (const member of members) {
         const score = scoreDiscordMember(member, query);

@@ -45,16 +45,16 @@ export type {
 export { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
 export { resolveDefaultGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
 export { withFileLock } from "openclaw/plugin-sdk/file-lock";
-export { keepHttpServerTaskAlive } from "openclaw/plugin-sdk/channel-outbound";
 export {
   detectMime,
   extensionForMime,
   extractOriginalFilename,
   getFileExtension,
-  resolveChannelMediaMaxBytes,
 } from "openclaw/plugin-sdk/media-runtime";
-export { dispatchReplyFromConfigWithSettledDispatcher } from "openclaw/plugin-sdk/channel-inbound";
+export { resolveChannelMediaMaxBytes } from "openclaw/plugin-sdk/account-helpers";
 export { loadOutboundMediaFromUrl } from "openclaw/plugin-sdk/outbound-media";
+// Deprecated media-legacy-projection surface; the re-export stays until the
+// compat record's removeAfter window expires (deleted in retirement PR 4).
 export { buildMediaPayload } from "openclaw/plugin-sdk/reply-payload";
 export type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 export type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";

@@ -1,6 +1,7 @@
 package ai.openclaw.app.voice
 
 import ai.openclaw.app.gateway.GatewaySession
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -15,9 +16,7 @@ internal data class TalkSpeakAudio(
   val fileExtension: String?,
 )
 
-/** Result of requesting remote speech synthesis through the gateway. */
 internal sealed interface TalkSpeakResult {
-  /** Remote synthesis returned audio that Android can route to playback. */
   data class Success(
     val audio: TalkSpeakAudio,
   ) : TalkSpeakResult
@@ -34,7 +33,6 @@ internal sealed interface TalkSpeakResult {
 }
 
 internal interface TalkSpeechSynthesizing {
-  /** Synthesizes assistant text using optional per-utterance talk directives. */
   suspend fun synthesize(
     text: String,
     directive: TalkDirective?,
@@ -58,6 +56,8 @@ internal class TalkSpeakClient(
           paramsJson = json.encodeToString(TalkSpeakRequest.from(text = text, directive = directive)),
           timeoutMs = 45_000,
         )
+      } catch (err: CancellationException) {
+        throw err
       } catch (err: Throwable) {
         return TalkSpeakResult.Failure(err.message ?: "talk.speak request failed")
       }
@@ -118,7 +118,6 @@ internal class TalkSpeakClient(
   }
 }
 
-/** Gateway talk.speak request payload assembled from text plus directive overrides. */
 @Serializable
 internal data class TalkSpeakRequest(
   val text: String,
@@ -137,7 +136,6 @@ internal data class TalkSpeakRequest(
   val latencyTier: Int? = null,
 ) {
   companion object {
-    /** Converts parsed inline talk directives into the gateway RPC payload shape. */
     fun from(
       text: String,
       directive: TalkDirective?,

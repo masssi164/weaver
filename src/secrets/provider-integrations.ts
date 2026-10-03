@@ -7,6 +7,8 @@ import type {
   ManualExecSecretProviderConfig,
   PluginIntegrationSecretProviderConfig,
 } from "../config/types.secrets.js";
+import { openRootFileSync } from "../infra/boundary-file-read.js";
+import { isPathInside } from "../infra/path-guards.js";
 import { normalizePluginsConfig, type NormalizedPluginsConfig } from "../plugins/config-state.js";
 import { shouldRejectHardlinkedPluginFiles } from "../plugins/hardlink-policy.js";
 import { isActivatedManifestOwner } from "../plugins/manifest-owner-policy.js";
@@ -25,7 +27,7 @@ export type SecretProviderIntegrationPreset = {
 };
 
 /** Result of materializing a plugin integration into a manual exec provider config. */
-export type SecretProviderIntegrationResolution =
+type SecretProviderIntegrationResolution =
   | {
       ok: true;
       providerConfig: ManualExecSecretProviderConfig;
@@ -38,21 +40,9 @@ export type SecretProviderIntegrationResolution =
 const NODE_COMMAND_PLACEHOLDER = "${node}";
 const PLUGIN_INTEGRATION_PROVIDER_ID_MAX_LENGTH = 128;
 
-function isPathInsideOrEqual(rootDir: string, candidate: string): boolean {
-  const relative = path.relative(path.resolve(rootDir), path.resolve(candidate));
-  return (
-    relative === "" ||
-    (relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-}
-
 function resolvePluginRelativePath(value: string, pluginRoot: string): string | undefined {
   const resolved = path.resolve(pluginRoot, value);
-  return isPathInsideOrEqual(pluginRoot, resolved) ? resolved : undefined;
-}
-
-function isPluginRelativeEntrypoint(value: string): boolean {
-  return value.startsWith("./");
+  return isPathInside(pluginRoot, resolved) ? resolved : undefined;
 }
 
 function resolveArg(arg: string, pluginRoot: string): string | undefined {
@@ -84,120 +74,50 @@ function isSecurePosixPathStat(stat: fs.Stats): boolean {
   return stat.uid === uid || stat.uid === 0;
 }
 
-function pathSegmentsBetween(rootDir: string, targetDir: string): string[] | undefined {
-  const relative = path.relative(rootDir, targetDir);
-  if (relative === "") {
-    return [];
-  }
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    return undefined;
-  }
-  return relative.split(path.sep).filter(Boolean);
-}
-
-function isSecurePluginEntrypointPath(params: {
-  pluginRoot: string;
-  pluginRootRealpath: string;
-  resolvedEntrypoint: string;
-  entrypointRealpath: string;
-  allowInsecurePath: boolean;
-}): boolean {
-  if (params.allowInsecurePath || process.platform === "win32") {
-    return true;
-  }
-  const originalSegments = pathSegmentsBetween(
-    path.resolve(params.pluginRoot),
-    path.dirname(path.resolve(params.resolvedEntrypoint)),
-  );
-  const realpathSegments = pathSegmentsBetween(
-    params.pluginRootRealpath,
-    path.dirname(params.entrypointRealpath),
-  );
-  if (!originalSegments || !realpathSegments) {
-    return false;
-  }
-
-  // Validate both lexical and realpath parent chains. The lexical chain catches symlink tricks
-  // inside the plugin tree; the realpath chain catches world-writable resolved directories.
-  let originalDir = path.resolve(params.pluginRoot);
-  for (const [index, segment] of ["", ...originalSegments].entries()) {
-    if (segment) {
-      originalDir = path.join(originalDir, segment);
-    }
-    const stat = fs.lstatSync(originalDir);
-    if (index === 0 && stat.isSymbolicLink()) {
-      continue;
-    }
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !isSecurePosixPathStat(stat)) {
-      return false;
-    }
-  }
-
-  let realpathDir = params.pluginRootRealpath;
-  for (const segment of ["", ...realpathSegments]) {
-    if (segment) {
-      realpathDir = path.join(realpathDir, segment);
-    }
-    const stat = fs.lstatSync(realpathDir);
-    if (!stat.isDirectory() || !isSecurePosixPathStat(stat)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 function resolveNodeEntrypointArg(params: {
   integration: PluginManifestSecretProviderIntegration;
   pluginRoot: string;
   rejectHardlinks: boolean;
 }): string | undefined {
   const entrypoint = params.integration.args?.[0];
-  if (!entrypoint || !isPluginRelativeEntrypoint(entrypoint)) {
-    return undefined;
-  }
-  let pluginRootRealpath: string;
-  try {
-    pluginRootRealpath = fs.realpathSync(params.pluginRoot);
-  } catch {
+  if (!entrypoint?.startsWith("./")) {
     return undefined;
   }
   const resolved = resolvePluginRelativePath(entrypoint, params.pluginRoot);
   if (!resolved) {
     return undefined;
   }
-  let stat: fs.Stats;
   try {
-    stat = fs.lstatSync(resolved);
-  } catch {
-    return undefined;
-  }
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    return undefined;
-  }
-  if (params.rejectHardlinks && stat.nlink > 1) {
-    return undefined;
-  }
-  if (params.integration.allowInsecurePath !== true && !isSecurePosixPathStat(stat)) {
-    return undefined;
-  }
-  try {
-    const realpath = fs.realpathSync(resolved);
-    if (!isPathInsideOrEqual(pluginRootRealpath, realpath)) {
+    const opened = openRootFileSync({
+      absolutePath: resolved,
+      rootPath: params.pluginRoot,
+      boundaryLabel: "plugin root",
+      rejectHardlinks: params.rejectHardlinks,
+      symlinks: process.platform === "win32" ? "follow-parents-within-root" : "reject",
+    });
+    if (!opened.ok) {
       return undefined;
     }
-    if (
-      !isSecurePluginEntrypointPath({
-        pluginRoot: params.pluginRoot,
-        pluginRootRealpath,
-        resolvedEntrypoint: resolved,
-        entrypointRealpath: realpath,
-        allowInsecurePath: params.integration.allowInsecurePath === true,
-      })
-    ) {
-      return undefined;
+    try {
+      if (!isSecurePosixPathStat(opened.stat)) {
+        return undefined;
+      }
+      // fs-safe owns alias admission; OpenClaw retains executable-parent trust policy.
+      if (process.platform !== "win32") {
+        for (let directory = path.dirname(opened.path); ; directory = path.dirname(directory)) {
+          const stat = fs.lstatSync(directory);
+          if (!stat.isDirectory() || !isSecurePosixPathStat(stat)) {
+            return undefined;
+          }
+          if (directory === opened.rootRealPath) {
+            break;
+          }
+        }
+      }
+      return opened.path;
+    } finally {
+      fs.closeSync(opened.fd);
     }
-    return realpath;
   } catch {
     return undefined;
   }
@@ -249,9 +169,6 @@ function materializeExecProviderConfig(
     ...(integration.env ? { env: integration.env } : {}),
     ...(integration.passEnv ? { passEnv: integration.passEnv } : {}),
     trustedDirs,
-    ...(integration.command === NODE_COMMAND_PLACEHOLDER || integration.allowInsecurePath
-      ? { allowInsecurePath: true }
-      : {}),
   };
 }
 

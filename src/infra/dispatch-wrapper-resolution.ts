@@ -9,12 +9,11 @@ import {
 import { normalizeExecutableToken } from "./exec-wrapper-tokens.js";
 import { parseInlineOptionToken } from "./inline-option-token.js";
 
-export { unwrapEnvInvocation } from "./command-carriers.js";
-
 export const MAX_DISPATCH_WRAPPER_DEPTH = 4;
 
 const NICE_OPTIONS_WITH_VALUE = new Set(["-n", "--adjustment", "--priority"]);
 const CAFFEINATE_OPTIONS_WITH_VALUE = new Set(["-t", "-w"]);
+const CAFFEINATE_FLAG_OPTIONS = new Set(["-d", "-i", "-m", "-s", "-u"]);
 const STDBUF_OPTIONS_WITH_VALUE = new Set(["-i", "--input", "-o", "--output", "-e", "--error"]);
 const FLOCK_SHORT_FLAG_OPTIONS = new Set(["-e", "-F", "-n", "-o", "-s", "-x"]);
 const FLOCK_LONG_FLAG_OPTIONS = new Set([
@@ -152,7 +151,9 @@ export function extractEnvAssignmentKeysFromDispatchWrappers(
 function unwrapDashOptionInvocation(
   argv: string[],
   params: {
-    onFlag: (flag: string, lowerToken: string) => WrapperScanDirective;
+    onFlag?: (flag: string, lowerToken: string) => WrapperScanDirective;
+    flagOptions?: ReadonlySet<string>;
+    optionsWithValue?: ReadonlySet<string>;
     adjustCommandIndex?: (commandIndex: number, argv: string[]) => number | null;
   },
 ): string[] | null {
@@ -163,7 +164,16 @@ function unwrapDashOptionInvocation(
         return "stop";
       }
       const { name: flag } = parseInlineOptionToken(lower);
-      return params.onFlag(flag, lower);
+      if (params.onFlag) {
+        return params.onFlag(flag, lower);
+      }
+      if (params.flagOptions?.has(flag)) {
+        return "continue";
+      }
+      if (params.optionsWithValue?.has(flag)) {
+        return lower.includes("=") ? "continue" : "consume-next";
+      }
+      return "invalid";
     },
     adjustCommandIndex: params.adjustCommandIndex,
   });
@@ -186,20 +196,6 @@ function unwrapNiceInvocation(argv: string[]): string[] | null {
   });
 }
 
-function unwrapCaffeinateInvocation(argv: string[]): string[] | null {
-  return unwrapDashOptionInvocation(argv, {
-    onFlag: (flag, lower) => {
-      if (flag === "-d" || flag === "-i" || flag === "-m" || flag === "-s" || flag === "-u") {
-        return "continue";
-      }
-      if (CAFFEINATE_OPTIONS_WITH_VALUE.has(flag)) {
-        return lower !== flag || lower.includes("=") ? "continue" : "consume-next";
-      }
-      return "invalid";
-    },
-  });
-}
-
 function unwrapNohupInvocation(argv: string[]): string[] | null {
   return scanWrapperInvocation(argv, {
     separators: new Set(["--"]),
@@ -208,42 +204,6 @@ function unwrapNohupInvocation(argv: string[]): string[] | null {
         return "stop";
       }
       return lower === "--help" || lower === "--version" ? "continue" : "invalid";
-    },
-  });
-}
-
-function unwrapSandboxExecInvocation(argv: string[]): string[] | null {
-  return unwrapDashOptionInvocation(argv, {
-    onFlag: (flag, lower) => {
-      if (SANDBOX_EXEC_OPTIONS_WITH_VALUE.has(flag)) {
-        return lower !== flag || lower.includes("=") ? "continue" : "consume-next";
-      }
-      return "invalid";
-    },
-  });
-}
-
-function unwrapStdbufInvocation(argv: string[]): string[] | null {
-  return unwrapDashOptionInvocation(argv, {
-    onFlag: (flag, lower) => {
-      if (!STDBUF_OPTIONS_WITH_VALUE.has(flag)) {
-        return "invalid";
-      }
-      return lower.includes("=") ? "continue" : "consume-next";
-    },
-  });
-}
-
-function unwrapTimeInvocation(argv: string[]): string[] | null {
-  return unwrapDashOptionInvocation(argv, {
-    onFlag: (flag, lower) => {
-      if (TIME_FLAG_OPTIONS.has(flag)) {
-        return "continue";
-      }
-      if (TIME_OPTIONS_WITH_VALUE.has(flag)) {
-        return lower.includes("=") ? "continue" : "consume-next";
-      }
-      return "invalid";
     },
   });
 }
@@ -367,15 +327,8 @@ function unwrapScriptInvocation(
 
 function unwrapTimeoutInvocation(argv: string[]): string[] | null {
   return unwrapDashOptionInvocation(argv, {
-    onFlag: (flag, lower) => {
-      if (TIMEOUT_FLAG_OPTIONS.has(flag)) {
-        return "continue";
-      }
-      if (TIMEOUT_OPTIONS_WITH_VALUE.has(flag)) {
-        return lower.includes("=") ? "continue" : "consume-next";
-      }
-      return "invalid";
-    },
+    flagOptions: TIMEOUT_FLAG_OPTIONS,
+    optionsWithValue: TIMEOUT_OPTIONS_WITH_VALUE,
     adjustCommandIndex: (commandIndex, currentArgv) => {
       const wrappedCommandIndex = commandIndex + 1;
       return wrappedCommandIndex < currentArgv.length ? wrappedCommandIndex : null;
@@ -436,6 +389,7 @@ type DispatchWrapperSpec = {
   name: string;
   unwrap?: (argv: string[], platform?: NodeJS.Platform) => string[] | null;
   transparentUsage?: boolean | ((argv: string[], platform?: NodeJS.Platform) => boolean);
+  changesExecutableLookup?: true;
 };
 
 const DISPATCH_WRAPPER_SPECS: readonly DispatchWrapperSpec[] = [
@@ -445,36 +399,89 @@ const DISPATCH_WRAPPER_SPECS: readonly DispatchWrapperSpec[] = [
       supportsArchDispatchWrapper(platform) ? unwrapArchInvocation(argv) : null,
     transparentUsage: (_argv, platform) => supportsArchDispatchWrapper(platform),
   },
-  { name: "caffeinate", unwrap: unwrapCaffeinateInvocation, transparentUsage: true },
+  {
+    name: "caffeinate",
+    unwrap: (argv) =>
+      unwrapDashOptionInvocation(argv, {
+        flagOptions: CAFFEINATE_FLAG_OPTIONS,
+        optionsWithValue: CAFFEINATE_OPTIONS_WITH_VALUE,
+      }),
+    transparentUsage: true,
+  },
+  { name: "bwrap" },
+  { name: "catchsegv" },
   { name: "chrt" },
+  { name: "chroot" },
+  { name: "cpulimit" },
   { name: "doas" },
+  { name: "eatmydata" },
   {
     name: "env",
     unwrap: unwrapEnvInvocation,
     transparentUsage: (argv) => !envInvocationUsesModifiers(argv),
   },
+  { name: "firejail" },
   { name: "flock", unwrap: unwrapFlockInvocation, transparentUsage: true },
+  { name: "gosu" },
   { name: "ionice" },
+  { name: "linux32" },
+  { name: "linux64" },
   { name: "nice", unwrap: unwrapNiceInvocation, transparentUsage: true },
+  { name: "nsenter" },
   { name: "nohup", unwrap: unwrapNohupInvocation, transparentUsage: true },
-  { name: "sandbox-exec", unwrap: unwrapSandboxExecInvocation, transparentUsage: true },
+  { name: "numactl" },
+  { name: "pkexec" },
+  { name: "proot" },
+  { name: "proxychains" },
+  { name: "proxychains4" },
+  { name: "runuser" },
+  {
+    name: "sandbox-exec",
+    unwrap: (argv) =>
+      unwrapDashOptionInvocation(argv, {
+        optionsWithValue: SANDBOX_EXEC_OPTIONS_WITH_VALUE,
+      }),
+    transparentUsage: true,
+  },
   { name: "script", unwrap: unwrapScriptInvocation, transparentUsage: false },
+  { name: "setarch" },
   { name: "setsid" },
-  { name: "stdbuf", unwrap: unwrapStdbufInvocation, transparentUsage: true },
+  { name: "setpriv" },
+  {
+    name: "stdbuf",
+    unwrap: (argv) =>
+      unwrapDashOptionInvocation(argv, {
+        optionsWithValue: STDBUF_OPTIONS_WITH_VALUE,
+      }),
+    transparentUsage: true,
+  },
+  { name: "su" },
   { name: "sudo" },
+  { name: "systemd-run" },
   { name: "taskset" },
   {
     name: "time",
-    unwrap: unwrapTimeInvocation,
+    unwrap: (argv) =>
+      unwrapDashOptionInvocation(argv, {
+        flagOptions: TIME_FLAG_OPTIONS,
+        optionsWithValue: TIME_OPTIONS_WITH_VALUE,
+      }),
     transparentUsage: (argv) => !timeInvocationWritesOutputFile(argv),
   },
   { name: "timeout", unwrap: unwrapTimeoutInvocation, transparentUsage: true },
+  { name: "torify" },
+  { name: "torsocks" },
+  { name: "unbuffer" },
+  { name: "unshare" },
+  { name: "watch" },
   {
     name: "xcrun",
+    changesExecutableLookup: true,
     unwrap: (argv, platform) =>
       supportsXcrunDispatchWrapper(platform) ? unwrapXcrunInvocation(argv) : null,
     transparentUsage: (_argv, platform) => supportsXcrunDispatchWrapper(platform),
   },
+  { name: "xvfb-run" },
 ];
 
 const DISPATCH_WRAPPER_SPEC_BY_NAME = new Map(
@@ -490,11 +497,15 @@ type DispatchWrapperUnwrapResult =
   | { kind: "unwrapped"; wrapper: string; argv: string[] };
 
 type DispatchWrapperTrustPlan = {
+  dispatchChainComplete: boolean;
   argv: string[];
   wrappers: string[];
+  wrapperInvocations: DispatchWrapperInvocation[];
   policyBlocked: boolean;
   blockedWrapper?: string;
 };
+
+export type DispatchWrapperInvocation = { wrapper: string; sourceArgv: string[] };
 
 function blockDispatchWrapper(wrapper: string): DispatchWrapperUnwrapResult {
   return { kind: "blocked", wrapper };
@@ -559,12 +570,15 @@ function isSemanticDispatchWrapperUsage(
 function blockedDispatchWrapperPlan(params: {
   argv: string[];
   wrappers: string[];
+  wrapperInvocations: DispatchWrapperInvocation[];
   blockedWrapper: string;
 }): DispatchWrapperTrustPlan {
   return {
     argv: params.argv,
     wrappers: params.wrappers,
+    wrapperInvocations: params.wrapperInvocations,
     policyBlocked: true,
+    dispatchChainComplete: false,
     blockedWrapper: params.blockedWrapper,
   };
 }
@@ -576,12 +590,14 @@ export function resolveDispatchWrapperTrustPlan(
 ): DispatchWrapperTrustPlan {
   let current = argv;
   const wrappers: string[] = [];
+  const wrapperInvocations: DispatchWrapperInvocation[] = [];
   for (let depth = 0; depth < maxDepth; depth += 1) {
     const unwrap = unwrapKnownDispatchWrapperInvocation(current, platform);
     if (unwrap.kind === "blocked") {
       return blockedDispatchWrapperPlan({
         argv: current,
         wrappers,
+        wrapperInvocations,
         blockedWrapper: unwrap.wrapper,
       });
     }
@@ -589,10 +605,12 @@ export function resolveDispatchWrapperTrustPlan(
       break;
     }
     wrappers.push(unwrap.wrapper);
+    wrapperInvocations.push({ wrapper: unwrap.wrapper, sourceArgv: [...current] });
     if (isSemanticDispatchWrapperUsage(unwrap.wrapper, current, platform)) {
       return blockedDispatchWrapperPlan({
         argv: current,
         wrappers,
+        wrapperInvocations,
         blockedWrapper: unwrap.wrapper,
       });
     }
@@ -604,11 +622,20 @@ export function resolveDispatchWrapperTrustPlan(
       return blockedDispatchWrapperPlan({
         argv: current,
         wrappers,
+        wrapperInvocations,
         blockedWrapper: overflow.wrapper,
       });
     }
   }
-  return { argv: current, wrappers, policyBlocked: false };
+  return {
+    argv: current,
+    wrappers,
+    wrapperInvocations,
+    policyBlocked: false,
+    dispatchChainComplete: wrappers.every(
+      (wrapper) => !DISPATCH_WRAPPER_SPEC_BY_NAME.get(wrapper)?.changesExecutableLookup,
+    ),
+  };
 }
 
 export function hasDispatchEnvManipulation(argv: string[]): boolean {

@@ -1,11 +1,13 @@
 // Provides the process-local plugin approval path used by embedded TUI runs.
 import { randomUUID } from "node:crypto";
+import { createDeferredCore } from "../shared/deferred.js";
+import { notifyListeners } from "../shared/listeners.js";
 import type { ExecApprovalDecision } from "./exec-approvals.js";
-import {
-  resolvePluginApprovalRequestAllowedDecisions,
-  type PluginApprovalRequest,
-  type PluginApprovalRequestPayload,
-  type PluginApprovalResolved,
+import { resolveCanonicalPluginApprovalRequestAllowedDecisions } from "./plugin-approval-canonical-decisions.js";
+import type {
+  PluginApprovalRequest,
+  PluginApprovalRequestPayload,
+  PluginApprovalResolved,
 } from "./plugin-approvals.js";
 
 type PendingApproval = {
@@ -48,17 +50,17 @@ export class EmbeddedPluginApprovalBroker {
     const id = `plugin:${randomUUID()}`;
     const createdAtMs = Date.now();
     const record: PluginApprovalRequest = {
+      approvalKind: "plugin",
       id,
       request: params.request,
       createdAtMs,
       expiresAtMs: createdAtMs + params.timeoutMs,
     };
-    let resolve!: (decision: ExecApprovalDecision | null) => void;
-    let reject!: (error: unknown) => void;
-    const decision = new Promise<ExecApprovalDecision | null>((resolvePromise, rejectPromise) => {
-      resolve = resolvePromise;
-      reject = rejectPromise;
-    });
+    const {
+      promise: decision,
+      resolve,
+      reject,
+    } = createDeferredCore<ExecApprovalDecision | null>();
     const timer = setTimeout(() => {
       const entry = this.pending.get(id);
       if (!entry) {
@@ -95,7 +97,9 @@ export class EmbeddedPluginApprovalBroker {
     const entry = this.pending.get(id);
     if (
       !entry ||
-      !resolvePluginApprovalRequestAllowedDecisions(entry.record.request).includes(decision)
+      !resolveCanonicalPluginApprovalRequestAllowedDecisions(entry.record.request).includes(
+        decision,
+      )
     ) {
       return false;
     }
@@ -126,9 +130,7 @@ export class EmbeddedPluginApprovalBroker {
   }
 
   private emit(event: ApprovalEvent): void {
-    for (const listener of this.listeners) {
-      listener(event);
-    }
+    notifyListeners(this.listeners, event);
   }
 }
 

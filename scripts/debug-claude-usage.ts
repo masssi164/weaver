@@ -1,12 +1,13 @@
-// Debug Claude Usage script supports OpenClaw repository automation.
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { expectDefined } from "../packages/normalization-core/src/expect.js";
 import { normalizeOptionalString } from "../packages/normalization-core/src/string-coerce.js";
-import { readBoundedResponseText as readBoundedResponseTextWithLimit } from "./lib/bounded-response.ts";
+import { requireOptionArgument } from "./lib/arg-utils.mts";
+import { readBoundedResponseText } from "./lib/bounded-response.mjs";
 import {
   maskIdentifier,
   parseStrictIntegerOption,
@@ -44,14 +45,22 @@ const parseArgs = (args = process.argv.slice(2)): Args => {
   let sessionKey: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--agent") {
-      agentId = parseNonBlankArgValue(parseRequiredArgValue(args, i, "--agent"), "--agent");
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith("--agent=")) {
-      agentId = parseNonBlankArgValue(parseInlineArgValue(arg, "--agent"), "--agent");
+    const arg = expectDefined(args[i], `Claude usage argument at index ${i}`);
+    const valueFlag = ["--agent", "--session-key"].find(
+      (flag) => arg === flag || arg.startsWith(`${flag}=`),
+    );
+    if (valueFlag) {
+      const value = parseNonBlankArgValue(
+        arg === valueFlag
+          ? requireOptionArgument(args, i++, valueFlag)
+          : arg.slice(valueFlag.length + 1),
+        valueFlag,
+      );
+      if (valueFlag === "--agent") {
+        agentId = value;
+      } else {
+        sessionKey = value;
+      }
       continue;
     }
     if (arg === "--help" || arg === "-h") {
@@ -62,42 +71,11 @@ const parseArgs = (args = process.argv.slice(2)): Args => {
       reveal = true;
       continue;
     }
-    if (arg === "--session-key") {
-      sessionKey = parseNonBlankArgValue(
-        parseRequiredArgValue(args, i, "--session-key"),
-        "--session-key",
-      );
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith("--session-key=")) {
-      sessionKey = parseNonBlankArgValue(
-        parseInlineArgValue(arg, "--session-key"),
-        "--session-key",
-      );
-      continue;
-    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
   return { agentId, help, reveal, sessionKey };
 };
-
-function parseRequiredArgValue(args: string[], index: number, label: string): string {
-  const value = args[index + 1];
-  if (!value || value.startsWith("-")) {
-    throw new Error(`${label} requires a value`);
-  }
-  return value;
-}
-
-function parseInlineArgValue(arg: string, label: string): string {
-  const value = arg.slice(`${label}=`.length);
-  if (!value) {
-    throw new Error(`${label} requires a value`);
-  }
-  return value;
-}
 
 function parseNonBlankArgValue(value: string, label: string): string {
   const normalized = normalizeOptionalString(value);
@@ -183,17 +161,6 @@ const withFetchTimeout = async <T>(
   }
 };
 
-const readBoundedResponseText = (
-  response: Response,
-  label: string,
-  signal: AbortSignal,
-  maxBytes = FETCH_RESPONSE_MAX_BYTES,
-): Promise<string> =>
-  readBoundedResponseTextWithLimit(response, label, maxBytes, {
-    createTooLargeError: (message) => new Error(message),
-    signal,
-  });
-
 const fetchText = async (
   label: string,
   url: string,
@@ -204,7 +171,7 @@ const fetchText = async (
   const timeoutMs = options.timeoutMs ?? resolveFetchTimeoutMs();
   return await withFetchTimeout(label, timeoutMs, async (signal) => {
     const res = await fetchImpl(url, { ...init, signal });
-    const text = await readBoundedResponseText(res, label, signal);
+    const text = await readBoundedResponseText(res, label, FETCH_RESPONSE_MAX_BYTES, { signal });
     return { res, text };
   });
 };
@@ -541,13 +508,8 @@ const main = async (argv = process.argv.slice(2)) => {
 
 export const testing = {
   CLAUDE_COOKIE_HOST_SQL,
-  CLAUDE_FIREFOX_COOKIE_HOST_SQL,
-  FETCH_RESPONSE_MAX_BYTES,
-  browserRootLabel,
   fetchAnthropicOAuthUsage,
-  mask,
   parseArgs,
-  readBoundedResponseText,
   resolveFetchTimeoutMs,
 };
 

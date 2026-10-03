@@ -1,4 +1,3 @@
-// Deepinfra provider module implements model/runtime integration.
 import {
   describeImageWithModel,
   describeImagesWithModel,
@@ -11,7 +10,7 @@ import {
   DEEPINFRA_STT_FALLBACK_MODELS,
   DEEPINFRA_VLM_FALLBACK_MODELS,
 } from "./media-models.js";
-import type { DeepInfraSurfaceModel } from "./provider-models.js";
+import type { DeepInfraSurfaceModel } from "./media-models.js";
 
 function resolveDefault(
   surfaceModels: readonly DeepInfraSurfaceModel[] | undefined,
@@ -21,7 +20,7 @@ function resolveDefault(
   return first ?? fallback[0] ?? "";
 }
 
-export async function transcribeDeepInfraAudio(params: AudioTranscriptionRequest) {
+async function transcribeDeepInfraAudio(params: AudioTranscriptionRequest) {
   return await transcribeOpenAiCompatibleAudio({
     ...params,
     provider: "deepinfra",

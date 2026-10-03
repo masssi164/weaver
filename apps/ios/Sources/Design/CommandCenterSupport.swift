@@ -1,42 +1,6 @@
 import OpenClawChatUI
 import SwiftUI
 
-struct CommandPanel<Content: View>: View {
-    var tint: Color?
-    var isProminent = false
-    var padding: CGFloat = 13
-    @ViewBuilder var content: Content
-
-    init(
-        tint: Color? = nil,
-        isProminent: Bool = false,
-        padding: CGFloat = 13,
-        @ViewBuilder content: () -> Content)
-    {
-        self.tint = tint
-        self.isProminent = isProminent
-        self.padding = padding
-        self.content = content()
-    }
-
-    var body: some View {
-        ProCard(
-            tint: self.tint,
-            isProminent: self.isProminent,
-            padding: self.padding,
-            radius: OpenClawProMetric.cardRadius)
-        {
-            self.content
-        }
-    }
-}
-
-struct CommandControlBackground: View {
-    var body: some View {
-        OpenClawProBackground()
-    }
-}
-
 struct CommandSessionRow: View {
     let item: CommandCenterTab.WorkItem
 
@@ -58,7 +22,7 @@ struct CommandSessionRow: View {
                             .frame(width: 7, height: 7)
                             .accessibilityHidden(true)
                     }
-                    Text(self.item.title)
+                    Text(verbatim: self.item.title)
                         .font(OpenClawType.subheadSemiBold)
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
@@ -69,21 +33,17 @@ struct CommandSessionRow: View {
                             .foregroundStyle(OpenClawBrand.accent)
                             .accessibilityHidden(true)
                     }
-                    Text(self.item.trailing)
+                    Text(verbatim: self.item.trailing)
                         .font(OpenClawType.caption2Medium)
                         .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
-                    Text(self.item.detail)
+                    Text(verbatim: self.item.detail)
                         .font(OpenClawType.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer(minLength: 6)
-                    if let progress = self.item.progress {
-                        ProProgressBar(progress: progress, color: self.item.color)
-                            .frame(width: 68)
-                    }
-                    Text(self.progressLabel)
+                    Text(self.stateLabel)
                         .font(OpenClawType.captionSemiBold)
                         .foregroundStyle(self.item.color)
                         .lineLimit(1)
@@ -93,17 +53,77 @@ struct CommandSessionRow: View {
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 6)
+        .overlay(alignment: .leading) {
+            OpenClawSessionColorStripe(color: self.item.sessionColor)
+        }
         .contentShape(Rectangle())
     }
 
-    private var progressLabel: String {
-        guard let progress = item.progress else {
-            return self.item.state
+    private var stateLabel: String {
+        switch self.item.state {
+        case "offline": String(localized: "offline")
+        case "off": String(localized: "off")
+        case "idle": String(localized: "idle")
+        case "open": String(localized: "open")
+        case "default": String(localized: "default")
+        case "recent": String(localized: "recent")
+        default: self.item.state
         }
-        if self.item.state == "offline" || self.item.state == "off" || self.item.state == "idle" {
-            return self.item.state
+    }
+}
+
+struct CommandSessionActions {
+    typealias Mutation = (any OpenClawChatTransport) async throws -> Void
+
+    let rename: (String?) -> Void
+    let moveToGroup: (String?) -> Void
+    let setColor: (String?) -> Void
+    let togglePinned: () -> Void
+    let toggleUnread: () -> Void
+    let fork: () -> Void
+    let toggleArchived: () -> Void
+    let delete: () -> Void
+
+    static func gateway(
+        session: OpenClawChatSessionEntry,
+        archivesSession: @escaping () -> Bool = { true },
+        performMutation: @escaping (String?, @escaping Mutation) -> Void,
+        fork: @escaping () -> Void) -> Self
+    {
+        func patch(
+            label: String?? = nil,
+            category: String?? = nil,
+            color: String?? = nil,
+            pinned: Bool? = nil,
+            archived: Bool? = nil,
+            unread: Bool? = nil)
+        {
+            performMutation(archived == true ? session.key : nil) { transport in
+                try await transport.patchSession(
+                    key: session.key,
+                    expectedSessionID: archived == nil ? nil : session.sessionId,
+                    label: label,
+                    category: category,
+                    color: color,
+                    pinned: pinned,
+                    archived: archived,
+                    unread: unread)
+            }
         }
-        return "\(Int((progress * 100).rounded()))%"
+
+        return Self(
+            rename: { patch(label: .some($0)) },
+            moveToGroup: { patch(category: .some($0)) },
+            setColor: { patch(color: .some($0)) },
+            togglePinned: { patch(pinned: session.pinned != true) },
+            toggleUnread: { patch(unread: session.unread != true) },
+            fork: fork,
+            toggleArchived: { patch(archived: archivesSession()) },
+            delete: {
+                performMutation(session.key) { transport in
+                    try await transport.deleteSession(key: session.key)
+                }
+            })
     }
 }
 
@@ -117,13 +137,9 @@ struct CommandSessionActionsModifier: ViewModifier {
     let categories: [String]
     let isArchived: Bool
     let isEnabled: Bool
-    let onRename: (String?) -> Void
-    let onMoveToGroup: (String?) -> Void
-    let onTogglePinned: () -> Void
-    let onToggleUnread: () -> Void
-    let onFork: () -> Void
-    let onToggleArchived: () -> Void
-    let onDelete: () -> Void
+    let canArchive: Bool
+    let canDelete: Bool
+    let actions: CommandSessionActions
 
     @State private var editor: Editor?
     @State private var draftText = ""
@@ -140,34 +156,46 @@ struct CommandSessionActionsModifier: ViewModifier {
     private func managedContent(_ content: Content) -> some View {
         content
             .contextMenu {
-                if self.isArchived {
-                    self.actionButton("Unarchive", systemImage: "archivebox") {
-                        self.onToggleArchived()
-                    }
-                    self.deleteButton
-                } else {
+                OpenClawSessionColorMenu(color: self.session.color, onSelect: self.actions.setColor)
+                if !self.isArchived {
                     self.actionButton(
-                        self.session.pinned == true ? "Unpin" : "Pin",
+                        self.session.pinned == true
+                            ? OpenClawTextValue.localized("Unpin")
+                            : OpenClawTextValue.localized("Pin"),
                         systemImage: self.session.pinned == true ? "pin.slash" : "pin")
                     {
-                        self.onTogglePinned()
+                        self.actions.togglePinned()
                     }
                     self.actionButton(
-                        self.session.unread == true ? "Mark as Read" : "Mark as Unread",
+                        self.session.unread == true
+                            ? OpenClawTextValue.localized("Mark as Read")
+                            : OpenClawTextValue.localized("Mark as Unread"),
                         systemImage: self.session.unread == true ? "envelope.open" : "envelope.badge")
                     {
-                        self.onToggleUnread()
+                        self.actions.toggleUnread()
                     }
                     self.actionButton("Rename…", systemImage: "pencil") {
                         self.beginRename()
                     }
-                    self.actionButton("Fork", systemImage: "arrow.triangle.branch") {
-                        self.onFork()
+                    self.actionButton(
+                        self.session.hasActiveRun == true
+                            ? OpenClawTextValue.localized("Fork from last completed message")
+                            : OpenClawTextValue.localized("Fork"),
+                        systemImage: "arrow.triangle.branch")
+                    {
+                        self.actions.fork()
                     }
                     self.groupMenu
-                    self.actionButton("Archive", systemImage: "archivebox") {
-                        self.onToggleArchived()
+                }
+                if self.canArchive {
+                    self.actionButton(
+                        self.isArchived ? .localized("Unarchive") : .localized("Archive"),
+                        systemImage: "archivebox")
+                    {
+                        self.actions.toggleArchived()
                     }
+                }
+                if self.canDelete {
                     self.deleteButton
                 }
             }
@@ -177,7 +205,9 @@ struct CommandSessionActionsModifier: ViewModifier {
                 Button {
                     self.commitEditor()
                 } label: {
-                    Text(self.editor == .rename ? "Save" : "Create")
+                    Text(self.editor == .rename
+                        ? LocalizedStringKey("Save")
+                        : LocalizedStringKey("Create"))
                         .font(OpenClawType.subheadSemiBold)
                 }
                 Button(role: .cancel) {
@@ -193,7 +223,7 @@ struct CommandSessionActionsModifier: ViewModifier {
                 titleVisibility: .visible)
             {
                 Button(role: .destructive) {
-                    self.onDelete()
+                    self.actions.delete()
                 } label: {
                     Text("Delete Session")
                         .font(OpenClawType.subheadSemiBold)
@@ -211,8 +241,8 @@ struct CommandSessionActionsModifier: ViewModifier {
     private var groupMenu: some View {
         Menu {
             ForEach(self.categories, id: \.self) { category in
-                self.actionButton(category, systemImage: "folder") {
-                    self.onMoveToGroup(category)
+                self.actionButton(.verbatim(category), systemImage: "folder") {
+                    self.actions.moveToGroup(category)
                 }
             }
             self.actionButton("New Group…", systemImage: "folder.badge.plus") {
@@ -221,7 +251,7 @@ struct CommandSessionActionsModifier: ViewModifier {
             }
             if self.normalized(self.session.category) != nil {
                 self.actionButton("Remove from Group", systemImage: "folder.badge.minus") {
-                    self.onMoveToGroup(nil)
+                    self.actions.moveToGroup(nil)
                 }
             }
         } label: {
@@ -246,21 +276,29 @@ struct CommandSessionActionsModifier: ViewModifier {
     }
 
     private var editorTitle: String {
-        self.editor == .newGroup ? "New Group" : "Rename Session"
+        self.editor == .newGroup
+            ? String(localized: "New Group")
+            : String(localized: "Rename Session")
     }
 
     private var editorPlaceholder: String {
-        self.editor == .newGroup ? "Group name" : "Session name"
+        self.editor == .newGroup
+            ? String(localized: "Group name")
+            : String(localized: "Session name")
     }
 
     private func actionButton(
-        _ title: String,
+        _ title: OpenClawTextValue,
         systemImage: String,
         action: @escaping () -> Void) -> some View
     {
         Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(OpenClawType.subhead)
+            Label {
+                title.text
+                    .font(OpenClawType.subhead)
+            } icon: {
+                Image(systemName: systemImage)
+            }
         }
     }
 
@@ -275,13 +313,13 @@ struct CommandSessionActionsModifier: ViewModifier {
         let value = self.normalized(self.draftText)
         switch self.editor {
         case .rename:
-            self.onRename(value)
+            self.actions.rename(value)
         case .newGroup:
             if let value {
                 // Web parity: only prompt-created groups join the stored list,
                 // so they survive as empty sections after members leave.
                 SessionGroupStore.remember(value)
-                self.onMoveToGroup(value)
+                self.actions.moveToGroup(value)
             }
         case nil:
             break
@@ -302,26 +340,18 @@ extension View {
         categories: [String],
         isArchived: Bool = false,
         isEnabled: Bool = true,
-        onRename: @escaping (String?) -> Void,
-        onMoveToGroup: @escaping (String?) -> Void,
-        onTogglePinned: @escaping () -> Void,
-        onToggleUnread: @escaping () -> Void,
-        onFork: @escaping () -> Void,
-        onToggleArchived: @escaping () -> Void,
-        onDelete: @escaping () -> Void) -> some View
+        canArchive: Bool = true,
+        canDelete: Bool = true,
+        actions: CommandSessionActions) -> some View
     {
         self.modifier(CommandSessionActionsModifier(
             session: session,
             categories: categories,
             isArchived: isArchived,
             isEnabled: isEnabled,
-            onRename: onRename,
-            onMoveToGroup: onMoveToGroup,
-            onTogglePinned: onTogglePinned,
-            onToggleUnread: onToggleUnread,
-            onFork: onFork,
-            onToggleArchived: onToggleArchived,
-            onDelete: onDelete))
+            canArchive: canArchive,
+            canDelete: canDelete,
+            actions: actions))
     }
 }
 
@@ -338,8 +368,8 @@ struct CommandViewMoreRow: View {
 
 struct CommandEmptyStateRow: View {
     let icon: String
-    let title: String
-    let detail: String
+    let title: OpenClawTextValue
+    let detail: OpenClawTextValue
 
     var body: some View {
         HStack(spacing: 10) {
@@ -352,10 +382,10 @@ struct CommandEmptyStateRow: View {
                         .fill(OpenClawBrand.ok.opacity(0.10))
                 }
             VStack(alignment: .leading, spacing: 2) {
-                Text(self.title)
+                self.title.text
                     .font(OpenClawType.subheadSemiBold)
                     .lineLimit(1)
-                Text(self.detail)
+                self.detail.text
                     .font(OpenClawType.caption2Medium)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

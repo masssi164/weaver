@@ -1,4 +1,3 @@
-// Voice Call plugin module implements telnyx behavior.
 import crypto from "node:crypto";
 import type { TelnyxConfig } from "../config.js";
 import type {
@@ -20,7 +19,7 @@ import type {
 } from "../types.js";
 import { verifyTelnyxWebhook } from "../webhook-security.js";
 import type { VoiceCallProvider } from "./base.js";
-import { guardedJsonApiRequest } from "./shared/guarded-json-api.js";
+import { guardedJsonApiRequest, readProviderCallStatus } from "./shared/guarded-json-api.js";
 
 /**
  * Telnyx Voice API provider implementation.
@@ -84,9 +83,6 @@ export class TelnyxProvider implements VoiceCallProvider {
     this.options = options;
   }
 
-  /**
-   * Make an authenticated request to the Telnyx API.
-   */
   private async apiRequest<T = unknown>(
     endpoint: string,
     body: Record<string, unknown>,
@@ -107,9 +103,6 @@ export class TelnyxProvider implements VoiceCallProvider {
     });
   }
 
-  /**
-   * Verify Telnyx webhook signature using Ed25519.
-   */
   verifyWebhook(ctx: WebhookContext): WebhookVerificationResult {
     const result = verifyTelnyxWebhook(ctx, this.publicKey, {
       skipVerification: this.options.skipVerification,
@@ -120,12 +113,10 @@ export class TelnyxProvider implements VoiceCallProvider {
       reason: result.reason,
       isReplay: result.isReplay,
       verifiedRequestKey: result.verifiedRequestKey,
+      releaseReplay: result.releaseReplay,
     };
   }
 
-  /**
-   * Parse Telnyx webhook event into normalized format.
-   */
   parseWebhookEvent(
     ctx: WebhookContext,
     options?: WebhookParseOptions,
@@ -148,9 +139,6 @@ export class TelnyxProvider implements VoiceCallProvider {
     }
   }
 
-  /**
-   * Convert Telnyx event to normalized event format.
-   */
   private normalizeEvent(data: TelnyxEvent, dedupeKey?: string): NormalizedEvent | null {
     // Decode client_state from Base64 (we encode it in initiateCall)
     let callId = "";
@@ -192,15 +180,20 @@ export class TelnyxProvider implements VoiceCallProvider {
           text: data.payload?.text || "",
         };
 
-      case "call.transcription":
+      case "call.transcription": {
+        const transcript =
+          data.payload?.transcription_data?.transcript ?? data.payload?.transcription ?? "";
+        if (!transcript.trim()) {
+          return null;
+        }
         return {
           ...baseEvent,
           type: "call.speech",
-          transcript:
-            data.payload?.transcription_data?.transcript ?? data.payload?.transcription ?? "",
+          transcript,
           isFinal: data.payload?.transcription_data?.is_final ?? data.payload?.is_final ?? true,
           confidence: data.payload?.transcription_data?.confidence ?? data.payload?.confidence,
         };
+      }
 
       case "call.hangup":
         return {
@@ -283,9 +276,6 @@ export class TelnyxProvider implements VoiceCallProvider {
     };
   }
 
-  /**
-   * Hang up a call via Telnyx API.
-   */
   async hangupCall(input: HangupCallInput): Promise<void> {
     await this.apiRequest(
       `/calls/${input.providerCallId}/actions/hangup`,
@@ -304,9 +294,6 @@ export class TelnyxProvider implements VoiceCallProvider {
     await this.apiRequest(`/calls/${input.providerCallId}/actions/answer`, body);
   }
 
-  /**
-   * Play TTS audio via Telnyx speak action.
-   */
   async playTts(input: PlayTtsInput): Promise<void> {
     await this.apiRequest(`/calls/${input.providerCallId}/actions/speak`, {
       command_id: crypto.randomUUID(),
@@ -316,9 +303,6 @@ export class TelnyxProvider implements VoiceCallProvider {
     });
   }
 
-  /**
-   * Start transcription (STT) via Telnyx.
-   */
   async startListening(input: StartListeningInput): Promise<void> {
     await this.apiRequest(`/calls/${input.providerCallId}/actions/transcription_start`, {
       command_id: crypto.randomUUID(),
@@ -326,9 +310,6 @@ export class TelnyxProvider implements VoiceCallProvider {
     });
   }
 
-  /**
-   * Stop transcription via Telnyx.
-   */
   async stopListening(input: StopListeningInput): Promise<void> {
     await this.apiRequest(
       `/calls/${input.providerCallId}/actions/transcription_stop`,
@@ -338,34 +319,28 @@ export class TelnyxProvider implements VoiceCallProvider {
   }
 
   async getCallStatus(input: GetCallStatusInput): Promise<GetCallStatusResult> {
-    try {
-      const data = await guardedJsonApiRequest<{ data?: { state?: string; is_alive?: boolean } }>({
-        url: `${this.baseUrl}/calls/${input.providerCallId}`,
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        allowNotFound: true,
-        allowedHostnames: [this.apiHost],
-        auditContext: "telnyx-get-call-status",
-        errorPrefix: "Telnyx get call status error",
-      });
-
-      if (!data) {
-        return { status: "not-found", isTerminal: true };
-      }
-
-      const state = data.data?.state ?? "unknown";
-      const isAlive = data.data?.is_alive;
-      // If is_alive is missing, treat as unknown rather than terminal (P1 fix)
-      if (isAlive === undefined) {
-        return { status: state, isTerminal: false, isUnknown: true };
-      }
-      return { status: state, isTerminal: !isAlive };
-    } catch {
-      return { status: "error", isTerminal: false, isUnknown: true };
-    }
+    return readProviderCallStatus(
+      () =>
+        guardedJsonApiRequest<{ data?: { state?: string; is_alive?: boolean } }>({
+          url: `${this.baseUrl}/calls/${input.providerCallId}`,
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            "Content-Type": "application/json",
+          },
+          allowNotFound: true,
+          allowedHostnames: [this.apiHost],
+          auditContext: "telnyx-get-call-status",
+          errorPrefix: "Telnyx get call status error",
+        }),
+      (data) => {
+        const status = data.data?.state ?? "unknown";
+        const isAlive = data.data?.is_alive;
+        return isAlive === undefined
+          ? { status, isTerminal: false, isUnknown: true }
+          : { status, isTerminal: !isAlive };
+      },
+    );
   }
 }
 

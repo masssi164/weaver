@@ -18,10 +18,6 @@ export function hasVerifiedBrowserAuth(req: Request): boolean {
   return (req as BrowserAuthMarkedRequest)[BROWSER_AUTH_VERIFIED_FLAG] === true;
 }
 
-function markVerifiedBrowserAuth(req: Request) {
-  (req as BrowserAuthMarkedRequest)[BROWSER_AUTH_VERIFIED_FLAG] = true;
-}
-
 /** Installs common Browser control-server middleware. */
 export function installBrowserCommonMiddleware(app: Express) {
   app.use((req, res, next) => {
@@ -41,8 +37,8 @@ export function installBrowserCommonMiddleware(app: Express) {
     });
     next();
   });
-  app.use(express.json({ limit: "1mb" }));
   app.use(browserMutationGuardMiddleware());
+  app.use(express.json({ limit: "1mb" }));
 }
 
 /** Installs optional token/password auth for Browser control-server requests. */
@@ -55,7 +51,7 @@ export function installBrowserAuthMiddleware(
   }
   app.use((req, res, next) => {
     if (isAuthorizedBrowserRequest(req, auth)) {
-      markVerifiedBrowserAuth(req);
+      (req as BrowserAuthMarkedRequest)[BROWSER_AUTH_VERIFIED_FLAG] = true;
       return next();
     }
     res.status(401).send("Unauthorized");

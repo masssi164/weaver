@@ -5,7 +5,7 @@ extension VoiceWakeOverlayController {
     @discardableResult
     func startSession(
         token: UUID = UUID(),
-        source: Source,
+        source: VoiceSessionCoordinator.Source,
         transcript: String,
         attributed: NSAttributedString? = nil,
         forwardEnabled: Bool = false,
@@ -18,7 +18,8 @@ extension VoiceWakeOverlayController {
         self.logger.log(level: .info, "\(message)")
         self.activeToken = token
         self.activeSource = source
-        self.autoSendTask?.cancel(); self.autoSendTask = nil; self.autoSendToken = nil
+        self.autoSendTask?.cancel()
+        self.autoSendTask = nil
         self.model.text = transcript
         self.model.isFinal = isFinal
         self.model.forwardEnabled = forwardEnabled
@@ -32,7 +33,7 @@ extension VoiceWakeOverlayController {
         return token
     }
 
-    func snapshot() -> (token: UUID?, source: Source?, text: String, isVisible: Bool) {
+    func snapshot() -> (token: UUID?, source: VoiceSessionCoordinator.Source?, text: String, isVisible: Bool) {
         (self.activeToken, self.activeSource, self.model.text, self.model.isVisible)
     }
 
@@ -44,7 +45,8 @@ extension VoiceWakeOverlayController {
         len=\(transcript.count)
         """
         self.logger.log(level: .info, "\(message)")
-        self.autoSendTask?.cancel(); self.autoSendTask = nil; self.autoSendToken = nil
+        self.autoSendTask?.cancel()
+        self.autoSendTask = nil
         self.model.text = transcript
         self.model.isFinal = false
         self.model.forwardEnabled = false
@@ -60,7 +62,6 @@ extension VoiceWakeOverlayController {
         token: UUID,
         transcript: String,
         autoSendAfter delay: TimeInterval?,
-        sendChime: VoiceWakeChime = .none,
         attributed: NSAttributedString? = nil)
     {
         guard self.guardToken(token, context: "final") else { return }
@@ -72,7 +73,6 @@ extension VoiceWakeOverlayController {
         """
         self.logger.log(level: .info, "\(message)")
         self.autoSendTask?.cancel()
-        self.autoSendToken = token
         self.model.text = transcript
         self.model.isFinal = true
         self.model.forwardEnabled = !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -109,6 +109,9 @@ extension VoiceWakeOverlayController {
     }
 
     func updateText(_ text: String) {
+        if let token = self.activeToken {
+            VoiceSessionCoordinator.shared.updateEditedText(token: token, text: text)
+        }
         self.model.text = text
         self.model.isSending = false
         self.model.attributed = self.makeAttributed(from: text)
@@ -118,7 +121,7 @@ extension VoiceWakeOverlayController {
     /// UI-only path: show sending state and dismiss; actual forwarding is handled by the coordinator.
     func beginSendUI(token: UUID, sendChime: VoiceWakeChime = .none) {
         guard self.guardToken(token, context: "beginSendUI") else { return }
-        self.autoSendTask?.cancel(); self.autoSendToken = nil
+        self.autoSendTask?.cancel()
         let message = """
         overlay beginSendUI token=\(token.uuidString) \
         isSending=\(self.model.isSending) \
@@ -152,6 +155,7 @@ extension VoiceWakeOverlayController {
 
     func dismiss(token: UUID? = nil, reason: DismissReason = .explicit, outcome: SendOutcome = .empty) {
         guard self.guardToken(token, context: "dismiss") else { return }
+        guard let dismissedToken = self.activeToken else { return }
         let message = """
         overlay dismiss token=\(self.activeToken?.uuidString ?? "nil") \
         reason=\(String(describing: reason)) \
@@ -160,7 +164,7 @@ extension VoiceWakeOverlayController {
         sending=\(self.model.isSending)
         """
         self.logger.log(level: .info, "\(message)")
-        self.autoSendTask?.cancel(); self.autoSendToken = nil
+        self.autoSendTask?.cancel()
         self.model.isSending = false
         self.model.isEditing = false
 
@@ -191,7 +195,7 @@ extension VoiceWakeOverlayController {
             window.animator().alphaValue = 0
         } completionHandler: {
             Task { @MainActor in
-                let dismissedToken = self.activeToken
+                guard self.guardToken(dismissedToken, context: "dismissCompletion") else { return }
                 window.orderOut(nil)
                 self.model.isVisible = false
                 self.model.level = 0
@@ -253,7 +257,6 @@ extension VoiceWakeOverlayController {
             after=\(delay)
             """)
         self.autoSendTask?.cancel()
-        self.autoSendToken = token
         self.autoSendTask = Task<Void, Never> { [weak self, token] in
             let nanos = UInt64(max(0, delay) * 1_000_000_000)
             try? await Task.sleep(nanoseconds: nanos)

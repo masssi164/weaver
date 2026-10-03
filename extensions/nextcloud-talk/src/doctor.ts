@@ -1,11 +1,18 @@
-// Nextcloud Talk plugin module implements doctor behavior.
-import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ChannelDoctorAdapter } from "openclaw/plugin-sdk/channel-contract";
+import type {
+  ChannelDoctorAdapter,
+  ChannelDoctorSequenceResult,
+} from "openclaw/plugin-sdk/channel-contract";
+import { fileExists } from "openclaw/plugin-sdk/file-access-runtime";
+import { resolveGatewayPort } from "openclaw/plugin-sdk/gateway-config-runtime";
 import { migratePersistentDedupeLegacyJsonFile } from "openclaw/plugin-sdk/persistent-dedupe";
 import { resolveStateDir } from "openclaw/plugin-sdk/state-paths";
-import { listNextcloudTalkAccountIds, resolveNextcloudTalkAccount } from "./accounts.js";
+import {
+  isNextcloudTalkAccountConfigured,
+  listNextcloudTalkAccountIds,
+  resolveNextcloudTalkAccount,
+} from "./accounts.js";
 import { probeNextcloudTalkBotResponseFeature } from "./bot-preflight.js";
 import {
   legacyConfigRules as NEXTCLOUD_TALK_LEGACY_CONFIG_RULES,
@@ -13,12 +20,16 @@ import {
 } from "./doctor-contract.js";
 import {
   NEXTCLOUD_TALK_PLUGIN_ID,
+  NEXTCLOUD_TALK_REPLAY_DEDUPE_MAX_ENTRIES,
   NEXTCLOUD_TALK_REPLAY_DEDUPE_NAMESPACE_PREFIX,
-} from "./replay-guard.js";
+  NEXTCLOUD_TALK_REPLAY_DEDUPE_TTL_MS,
+} from "./replay-migration-contract.js";
 import type { CoreConfig } from "./types.js";
-
-const REPLAY_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
-const REPLAY_DEDUPE_MAX_ENTRIES = 10_000;
+import {
+  DEFAULT_NEXTCLOUD_TALK_WEBHOOK_PATH,
+  describeNextcloudTalkWebhookRouteConflict,
+  resolveNextcloudTalkLegacyWebhook,
+} from "./webhook-route.js";
 
 function sanitizeLegacyReplaySegment(value: string): string {
   const trimmed = value.trim();
@@ -28,13 +39,41 @@ function sanitizeLegacyReplaySegment(value: string): string {
   return trimmed.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
+function runNextcloudTalkDoctorSequence(params: {
+  cfg: CoreConfig;
+  env?: NodeJS.ProcessEnv;
+}): ChannelDoctorSequenceResult {
+  const infoNotes: string[] = [];
+  const warningNotes: string[] = [];
+  for (const accountId of listNextcloudTalkAccountIds(params.cfg)) {
+    const account = resolveNextcloudTalkAccount({ cfg: params.cfg, accountId });
+    if (!account.enabled || !isNextcloudTalkAccountConfigured(account)) {
+      continue;
+    }
+    const gatewayPort = resolveGatewayPort({ gateway: params.cfg.gateway }, params.env);
+    const webhookPath = account.config.webhookPath ?? DEFAULT_NEXTCLOUD_TALK_WEBHOOK_PATH;
+    const destination = `Gateway port ${gatewayPort}${webhookPath}`;
+    const legacyListener = resolveNextcloudTalkLegacyWebhook(account.config);
+    const routeConflict = describeNextcloudTalkWebhookRouteConflict(webhookPath, gatewayPort);
+    if (routeConflict) {
+      warningNotes.push(
+        `- channels.nextcloud-talk.${account.accountId}: ${routeConflict}` +
+          (legacyListener
+            ? ` Legacy webhook listener ${legacyListener.host}:${legacyListener.port} remains available; verify the new route before setting legacyWebhook: false.`
+            : " This account cannot start until the callback path is changed."),
+      );
+    } else if (legacyListener) {
+      infoNotes.push(
+        `- channels.nextcloud-talk.${account.accountId}: legacy webhook listener ${legacyListener.host}:${legacyListener.port} forwards to the Gateway route. ` +
+          `Point the Nextcloud callback or reverse-proxy upstream to ${destination}, verify delivery, then set legacyWebhook: false to disable this account's legacy forwarding.`,
+      );
+    } else {
+      infoNotes.push(
+        `- channels.nextcloud-talk.${account.accountId}: legacyWebhook is false; use ${destination} for the Nextcloud callback or reverse-proxy upstream.`,
+      );
+    }
   }
+  return { changeNotes: [], warningNotes, infoNotes };
 }
 
 async function collectNextcloudTalkBotResponseWarnings(params: {
@@ -74,18 +113,18 @@ async function repairNextcloudTalkReplayDedupeState(params: {
 
   for (const accountId of listNextcloudTalkAccountIds(params.cfg)) {
     const legacyPath = path.join(replayDir, `${sanitizeLegacyReplaySegment(accountId)}.json`);
-    if (!(await fileExists(legacyPath))) {
+    if (!fileExists(legacyPath)) {
       continue;
     }
     try {
       const result = await migratePersistentDedupeLegacyJsonFile({
         filePath: legacyPath,
         namespace: accountId,
-        ttlMs: REPLAY_DEDUPE_TTL_MS,
+        ttlMs: NEXTCLOUD_TALK_REPLAY_DEDUPE_TTL_MS,
         memoryMaxSize: 0,
         pluginId: NEXTCLOUD_TALK_PLUGIN_ID,
         namespacePrefix: NEXTCLOUD_TALK_REPLAY_DEDUPE_NAMESPACE_PREFIX,
-        stateMaxEntries: REPLAY_DEDUPE_MAX_ENTRIES,
+        stateMaxEntries: NEXTCLOUD_TALK_REPLAY_DEDUPE_MAX_ENTRIES,
         env,
       });
       changes.push(
@@ -104,11 +143,11 @@ async function repairNextcloudTalkReplayDedupeState(params: {
 export const nextcloudTalkDoctor: ChannelDoctorAdapter = {
   legacyConfigRules: NEXTCLOUD_TALK_LEGACY_CONFIG_RULES,
   normalizeCompatibilityConfig: normalizeNextcloudTalkCompatibilityConfig,
-  collectPreviewWarnings: async ({ cfg }) =>
-    await collectNextcloudTalkBotResponseWarnings({ cfg: cfg as CoreConfig }),
+  runConfigSequence: runNextcloudTalkDoctorSequence,
+  collectPreviewWarnings: collectNextcloudTalkBotResponseWarnings,
   repairConfig: async ({ cfg, env }) => {
     const repair = await repairNextcloudTalkReplayDedupeState({
-      cfg: cfg as CoreConfig,
+      cfg,
       ...(env ? { env } : {}),
     });
     return {

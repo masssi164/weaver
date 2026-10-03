@@ -1,5 +1,5 @@
 // Browser CDP helpers connect plugin browser automation to Chrome DevTools Protocol sessions.
-import { redactSensitiveText } from "../logging/redact.js";
+import { redactToolPayloadText } from "../logging/redact.js";
 
 /** Detect an operator-supplied port before WHATWG URL normalization drops default ports. */
 function hasRawExplicitPort(raw: string): boolean {
@@ -44,12 +44,6 @@ export function parseBrowserHttpUrl(raw: string, label: string): BrowserHttpUrlP
   const hasExplicitPort = hasRawExplicitPort(trimmed);
   const port = parsed.port ? Number.parseInt(parsed.port, 10) : isSecure ? 443 : 80;
 
-  if (hasExplicitPort && !parsed.port) {
-    const defaultPort = isSecure ? 443 : 80;
-    if (port !== defaultPort) {
-      throw new Error(`${label} has invalid port: ${parsed.port}`);
-    }
-  }
   if (Number.isNaN(port) || port <= 0 || port > 65_535) {
     throw new Error(`${label} has invalid port: ${parsed.port}`);
   }
@@ -100,8 +94,8 @@ export function redactCdpUrl(cdpUrl: string | null | undefined): string | null |
     const parsed = new URL(trimmed);
     parsed.username = "";
     parsed.password = "";
-    return redactSensitiveText(parsed.toString().replace(/\/$/, ""));
+    return redactToolPayloadText(parsed.toString().replace(/\/$/, ""));
   } catch {
-    return redactSensitiveText(trimmed);
+    return redactToolPayloadText(trimmed);
   }
 }

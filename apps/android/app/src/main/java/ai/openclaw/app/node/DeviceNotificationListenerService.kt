@@ -4,6 +4,7 @@ import ai.openclaw.app.NotificationBurstLimiter
 import ai.openclaw.app.SecurePrefs
 import ai.openclaw.app.allowsPackage
 import ai.openclaw.app.isWithinQuietHours
+import ai.openclaw.app.takeUtf16Safe
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.RemoteInput
@@ -27,12 +28,21 @@ private const val NOTIFICATIONS_CHANGED_EVENT = "notifications.changed"
 internal fun sanitizeNotificationText(value: CharSequence?): String? {
   val normalized = value?.toString()?.trim().orEmpty()
   // Notification extras can include long previews; cap before sending over node events.
-  return normalized.take(MAX_NOTIFICATION_TEXT_CHARS).ifEmpty { null }
+  return normalized.takeUtf16Safe(MAX_NOTIFICATION_TEXT_CHARS).ifEmpty { null }
 }
 
 /**
- * Stable notification snapshot entry exposed through the Android notifications command.
+ * Keeps app-owned notifications outside the gateway list/action trust boundary.
  */
+internal fun isGatewayVisibleNotification(
+  appPackageName: String,
+  notificationPackageName: String?,
+): Boolean {
+  val appPackage = appPackageName.trim()
+  val notificationPackage = notificationPackageName?.trim().orEmpty()
+  return appPackage.isNotEmpty() && notificationPackage.isNotEmpty() && notificationPackage != appPackage
+}
+
 data class DeviceNotificationEntry(
   val key: String,
   val packageName: String,
@@ -60,18 +70,12 @@ internal fun DeviceNotificationEntry.toJsonObject(): JsonObject =
     channelId?.let { put("channelId", JsonPrimitive(it)) }
   }
 
-/**
- * Listener state exposed to the gateway, including whether Android has connected the service.
- */
 data class DeviceNotificationSnapshot(
   val enabled: Boolean,
   val connected: Boolean,
   val notifications: List<DeviceNotificationEntry>,
 )
 
-/**
- * Gateway-supported notification actions mapped to Android listener operations.
- */
 enum class NotificationActionKind {
   Open,
   Dismiss,
@@ -87,9 +91,6 @@ data class NotificationActionRequest(
   val replyText: String? = null,
 )
 
-/**
- * Normalized notification action result returned through node.invoke.
- */
 data class NotificationActionResult(
   val ok: Boolean,
   val code: String? = null,
@@ -137,10 +138,16 @@ private object DeviceNotificationStore {
     }
   }
 
-  fun snapshot(enabled: Boolean): DeviceNotificationSnapshot {
+  fun snapshot(
+    enabled: Boolean,
+    appPackageName: String,
+  ): DeviceNotificationSnapshot {
     val (isConnected, entries) =
       synchronized(lock) {
-        connected to byKey.values.sortedByDescending { it.postTimeMs }
+        connected to
+          byKey.values
+            .filter { isGatewayVisibleNotification(appPackageName, it.packageName) }
+            .sortedByDescending { it.postTimeMs }
       }
     return DeviceNotificationSnapshot(
       enabled = enabled,
@@ -150,9 +157,6 @@ private object DeviceNotificationStore {
   }
 }
 
-/**
- * Android notification listener that mirrors notification state and executes gateway actions.
- */
 class DeviceNotificationListenerService : NotificationListenerService() {
   private val securePrefs by lazy { SecurePrefs(applicationContext) }
   private val forwardingLimiter = NotificationBurstLimiter()
@@ -181,12 +185,11 @@ class DeviceNotificationListenerService : NotificationListenerService() {
 
   override fun onNotificationPosted(sbn: StatusBarNotification?) {
     super.onNotificationPosted(sbn)
-    val entry = sbn?.toEntry() ?: return
+    val posted = sbn ?: return
+    if (!isGatewayVisibleNotification(packageName, posted.packageName)) return
+    val entry = posted.toEntry()
     DeviceNotificationStore.upsert(entry)
     rememberRecentPackage(entry.packageName)
-    if (entry.packageName == packageName) {
-      return
-    }
     val payload = notificationChangedPayload(entry) ?: return
     emitNotificationsChanged(payload)
   }
@@ -276,7 +279,10 @@ class DeviceNotificationListenerService : NotificationListenerService() {
     val entries =
       runCatching {
         activeNotifications
+          ?.asSequence()
+          ?.filter { isGatewayVisibleNotification(packageName, it.packageName) }
           ?.mapNotNull { it.toEntry() }
+          ?.toList()
           ?: emptyList()
       }.getOrElse { emptyList() }
     DeviceNotificationStore.replace(entries)
@@ -315,7 +321,6 @@ class DeviceNotificationListenerService : NotificationListenerService() {
 
     private fun serviceComponent(context: Context): ComponentName = ComponentName(context, DeviceNotificationListenerService::class.java)
 
-    /** Installs the node event sink used to emit filtered notification change events. */
     fun setNodeEventSink(sink: ((event: String, payloadJson: String?) -> Unit)?) {
       nodeEventSink = sink
     }
@@ -349,7 +354,6 @@ class DeviceNotificationListenerService : NotificationListenerService() {
         .distinct()
     }
 
-    /** Checks whether Android has granted listener access to this service component. */
     fun isAccessEnabled(context: Context): Boolean {
       val manager = context.getSystemService(NotificationManager::class.java) ?: return false
       return manager.isNotificationListenerAccessGranted(serviceComponent(context))
@@ -359,7 +363,11 @@ class DeviceNotificationListenerService : NotificationListenerService() {
     fun snapshot(
       context: Context,
       enabled: Boolean = isAccessEnabled(context),
-    ): DeviceNotificationSnapshot = DeviceNotificationStore.snapshot(enabled = enabled)
+    ): DeviceNotificationSnapshot =
+      DeviceNotificationStore.snapshot(
+        enabled = enabled,
+        appPackageName = context.packageName,
+      )
 
     /** Asks Android to rebind the listener after settings grant access but callbacks have not arrived. */
     fun requestServiceRebind(context: Context) {
@@ -368,7 +376,6 @@ class DeviceNotificationListenerService : NotificationListenerService() {
       }
     }
 
-    /** Executes an open, dismiss, or reply action through the active listener instance. */
     fun executeAction(
       context: Context,
       request: NotificationActionRequest,
@@ -419,7 +426,10 @@ class DeviceNotificationListenerService : NotificationListenerService() {
   private fun executeActionInternal(request: NotificationActionRequest): NotificationActionResult {
     val sbn =
       activeNotifications
-        ?.firstOrNull { it.key == request.key }
+        ?.firstOrNull {
+          it.key == request.key &&
+            isGatewayVisibleNotification(packageName, it.packageName)
+        }
         ?: return NotificationActionResult(
           ok = false,
           code = "NOTIFICATION_NOT_FOUND",
@@ -442,34 +452,16 @@ class DeviceNotificationListenerService : NotificationListenerService() {
               code = "ACTION_UNAVAILABLE",
               message = "ACTION_UNAVAILABLE: notification has no open action",
             )
-        runCatching {
+        performNotificationAction("open failed") {
           pendingIntent.send()
-        }.fold(
-          onSuccess = { NotificationActionResult(ok = true) },
-          onFailure = { err ->
-            NotificationActionResult(
-              ok = false,
-              code = "ACTION_FAILED",
-              message = "ACTION_FAILED: ${err.message ?: "open failed"}",
-            )
-          },
-        )
+        }
       }
 
       NotificationActionKind.Dismiss -> {
-        runCatching {
+        performNotificationAction("dismiss failed") {
           cancelNotification(sbn.key)
           DeviceNotificationStore.remove(sbn.key)
-        }.fold(
-          onSuccess = { NotificationActionResult(ok = true) },
-          onFailure = { err ->
-            NotificationActionResult(
-              ok = false,
-              code = "ACTION_FAILED",
-              message = "ACTION_FAILED: ${err.message ?: "dismiss failed"}",
-            )
-          },
-        )
+        }
       }
 
       NotificationActionKind.Reply -> {
@@ -499,19 +491,25 @@ class DeviceNotificationListenerService : NotificationListenerService() {
           replyBundle.putCharSequence(remoteInput.resultKey, replyText)
         }
         RemoteInput.addResultsToIntent(remoteInputs, fillInIntent, replyBundle)
-        runCatching {
+        performNotificationAction("reply failed") {
           action.actionIntent.send(this, 0, fillInIntent)
-        }.fold(
-          onSuccess = { NotificationActionResult(ok = true) },
-          onFailure = { err ->
-            NotificationActionResult(
-              ok = false,
-              code = "ACTION_FAILED",
-              message = "ACTION_FAILED: ${err.message ?: "reply failed"}",
-            )
-          },
-        )
+        }
       }
     }
   }
+
+  private inline fun performNotificationAction(
+    fallbackMessage: String,
+    action: () -> Unit,
+  ): NotificationActionResult =
+    try {
+      action()
+      NotificationActionResult(ok = true)
+    } catch (err: Throwable) {
+      NotificationActionResult(
+        ok = false,
+        code = "ACTION_FAILED",
+        message = "ACTION_FAILED: ${err.message ?: fallbackMessage}",
+      )
+    }
 }

@@ -1,8 +1,3 @@
-/**
- * Configured binding session lookup.
- *
- * Resolves materialized binding records from stateful target session keys.
- */
 import type { ConfiguredBindingRecordResolution } from "./binding-types.js";
 import type { CompiledConfiguredBindingRegistry } from "./configured-binding-compiler.js";
 import { listConfiguredBindingConsumers } from "./configured-binding-consumers.js";
@@ -38,7 +33,6 @@ export function resolveConfiguredBindingRecordBySessionKeyFromRegistry(params: {
       continue;
     }
     let wildcardMatch: ConfiguredBindingRecordResolution | null = null;
-    let exactMatch: ConfiguredBindingRecordResolution | null = null;
     for (const rule of rules) {
       if (rule.targetFactory.driverId !== consumer.id) {
         continue;
@@ -67,14 +61,10 @@ export function resolveConfiguredBindingRecordBySessionKeyFromRegistry(params: {
       if (matchesSessionKey) {
         if (accountMatchPriority === 2) {
           // Exact account matches outrank wildcard account bindings for the same session key.
-          exactMatch = materializedTarget;
-          break;
+          return materializedTarget;
         }
         wildcardMatch = materializedTarget;
       }
-    }
-    if (exactMatch) {
-      return exactMatch;
     }
     if (wildcardMatch) {
       return wildcardMatch;

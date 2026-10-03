@@ -1,4 +1,3 @@
-// Whatsapp plugin module implements group session key behavior.
 import {
   DEFAULT_ACCOUNT_ID,
   normalizeAccountId,
@@ -46,9 +45,3 @@ export function resolveWhatsAppGroupSessionRoute(route: ResolvedAgentRoute): Res
     sessionKey,
   };
 }
-
-export const testing = {
-  resolveWhatsAppGroupAccountThreadId,
-  resolveWhatsAppLegacyGroupSessionKey,
-};
-export { testing as __testing };

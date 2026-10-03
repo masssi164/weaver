@@ -1,4 +1,3 @@
-// Minimax provider module implements model/runtime integration.
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type {
   OpenClawPluginApi,
@@ -6,43 +5,48 @@ import type {
   ProviderAuthContext,
   ProviderAuthResult,
   ProviderCatalogContext,
+  ProviderCatalogResult,
   ProviderResolveDynamicModelContext,
   ProviderRuntimeModel,
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
   MINIMAX_OAUTH_MARKER,
-  ensureAuthProfileStore,
-  listProfilesForProvider,
+  buildOauthProviderAuthResult,
+  isNonSecretApiKeyMarker,
 } from "openclaw/plugin-sdk/provider-auth";
-import { buildOauthProviderAuthResult } from "openclaw/plugin-sdk/provider-auth";
-import { createProviderApiKeyAuthMethod } from "openclaw/plugin-sdk/provider-auth-api-key";
+import { buildOpenAICompatibleLiveProviderCatalog } from "openclaw/plugin-sdk/provider-catalog-live-runtime";
+import { createProviderApiKeyAuthMethod } from "openclaw/plugin-sdk/provider-entry";
 import type { ProviderPlugin } from "openclaw/plugin-sdk/provider-model-shared";
 import {
   buildProviderReplayFamilyHooks,
   normalizeModelCompat,
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { MINIMAX_FAST_MODE_STREAM_HOOKS } from "openclaw/plugin-sdk/provider-stream-family";
+import { buildProviderStreamFamilyHooks } from "openclaw/plugin-sdk/provider-stream-family";
 import { fetchMinimaxUsage } from "openclaw/plugin-sdk/provider-usage";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   isMiniMaxModernModelId,
   MINIMAX_DEFAULT_MODEL_ID,
-  MINIMAX_TEXT_MODEL_CATALOG,
   MINIMAX_TEXT_MODEL_ORDER,
 } from "./api.js";
-import { DEFAULT_MINIMAX_MAX_TOKENS, resolveMinimaxApiCost } from "./model-definitions.js";
+import { buildMinimaxApiModelDefinition } from "./model-definitions.js";
 import type { MiniMaxRegion } from "./oauth.js";
 import { applyMinimaxApiConfig, applyMinimaxApiConfigCn } from "./onboard.js";
 import {
+  buildMinimaxModelDiscovery,
   buildMinimaxPortalProvider,
   buildMinimaxProvider,
   resolveMinimaxCatalogBaseUrl,
 } from "./provider-catalog.js";
+import {
+  createMinimaxPortalProvider,
+  createMinimaxProvider,
+  minimaxAuthMethodMetadata,
+} from "./provider-contract-api.js";
 import { resolveMinimaxThinkingProfile } from "./thinking.js";
 
 const API_PROVIDER_ID = "minimax";
 const PORTAL_PROVIDER_ID = "minimax-portal";
-const PROVIDER_LABEL = "MiniMax";
 const DEFAULT_MODEL = MINIMAX_DEFAULT_MODEL_ID;
 const DEFAULT_BASE_URL_CN = "https://api.minimaxi.com/anthropic";
 const DEFAULT_BASE_URL_GLOBAL = "https://api.minimax.io/anthropic";
@@ -52,18 +56,13 @@ const MINIMAX_USAGE_ENV_VAR_KEYS = [
   "MINIMAX_CODING_API_KEY",
   "MINIMAX_API_KEY",
 ] as const;
-const MINIMAX_WIZARD_GROUP = {
-  groupId: "minimax",
-  groupLabel: "MiniMax",
-  groupHint: "M3 (recommended)",
-} as const;
 const HYBRID_ANTHROPIC_OPENAI_REPLAY_HOOKS = buildProviderReplayFamilyHooks({
   family: "hybrid-anthropic-openai",
   anthropicModelDropThinkingBlocks: true,
 });
 const MINIMAX_PROVIDER_HOOKS = {
   ...HYBRID_ANTHROPIC_OPENAI_REPLAY_HOOKS,
-  ...MINIMAX_FAST_MODE_STREAM_HOOKS,
+  ...buildProviderStreamFamilyHooks("minimax-fast-mode"),
   resolveReasoningOutputMode: () => "native" as const,
   resolveThinkingProfile: ({ modelId }: { modelId: string }) =>
     resolveMinimaxThinkingProfile(modelId),
@@ -71,14 +70,6 @@ const MINIMAX_PROVIDER_HOOKS = {
 
 function getDefaultBaseUrl(region: MiniMaxRegion): string {
   return region === "cn" ? DEFAULT_BASE_URL_CN : DEFAULT_BASE_URL_GLOBAL;
-}
-
-function resolveMinimaxRegionLabel(region: MiniMaxRegion): string {
-  return region === "cn" ? "CN" : "Global";
-}
-
-function resolveMinimaxEndpointHint(region: MiniMaxRegion): string {
-  return region === "cn" ? "CN endpoint - api.minimaxi.com" : "Global endpoint - api.minimax.io";
 }
 
 function apiModelRef(modelId: string): string {
@@ -105,74 +96,115 @@ function buildPortalProviderCatalog(params: { baseUrl: string; apiKey: string })
   };
 }
 
-function findMinimaxCatalogModel(modelId: string) {
-  const normalizedModelId = modelId.trim().toLowerCase();
-  const catalogId = MINIMAX_TEXT_MODEL_ORDER.find((id) => id.toLowerCase() === normalizedModelId);
-  return catalogId ? { id: catalogId, model: MINIMAX_TEXT_MODEL_CATALOG[catalogId] } : undefined;
-}
-
 function resolveMinimaxDynamicModel(params: {
   providerId: string;
   ctx: ProviderResolveDynamicModelContext;
 }): ProviderRuntimeModel | undefined {
-  const catalogModel = findMinimaxCatalogModel(params.ctx.modelId);
-  if (!catalogModel) {
+  const normalizedModelId = params.ctx.modelId.trim().toLowerCase();
+  const catalogModelId = MINIMAX_TEXT_MODEL_ORDER.find(
+    (id) => id.toLowerCase() === normalizedModelId,
+  );
+  if (!catalogModelId) {
     return undefined;
   }
   return normalizeModelCompat({
-    id: catalogModel.id,
-    name: catalogModel.model.name,
+    ...buildMinimaxApiModelDefinition(catalogModelId),
     provider: params.providerId,
     api: "anthropic-messages",
     baseUrl:
       normalizeOptionalString(params.ctx.providerConfig?.baseUrl) ?? resolveMinimaxCatalogBaseUrl(),
-    reasoning: catalogModel.model.reasoning,
-    input: [...catalogModel.model.input],
-    cost: resolveMinimaxApiCost(catalogModel.id),
-    contextWindow: catalogModel.model.contextWindow,
-    maxTokens: DEFAULT_MINIMAX_MAX_TOKENS,
   });
 }
 
-function resolveApiCatalog(ctx: ProviderCatalogContext) {
-  const apiKey = ctx.resolveProviderApiKey(API_PROVIDER_ID).apiKey;
-  if (!apiKey) {
+async function resolveApiCatalog(ctx: ProviderCatalogContext) {
+  const auth = ctx.resolveProviderApiKey(API_PROVIDER_ID);
+  if (!auth.apiKey) {
     return null;
   }
-  return {
-    provider: {
-      ...buildMinimaxProvider(ctx.env),
-      apiKey,
-    },
+  const defaults = buildMinimaxProvider(ctx.env);
+  const providerConfig = {
+    ...defaults,
+    baseUrl: getProviderBaseUrl(ctx.config, API_PROVIDER_ID) ?? defaults.baseUrl,
+    api: ctx.config.models?.providers?.[API_PROVIDER_ID]?.api ?? defaults.api,
   };
+  return await buildOpenAICompatibleLiveProviderCatalog({
+    discoveryMode: "strict",
+    providerId: API_PROVIDER_ID,
+    providerConfig,
+    apiKey: auth.apiKey,
+    discoveryApiKey: auth.discoveryApiKey,
+    profileId: auth.profileId,
+    modelDiscovery: buildMinimaxModelDiscovery(providerConfig),
+  });
 }
 
-function resolvePortalCatalog(ctx: ProviderCatalogContext) {
+async function resolvePortalCatalog(ctx: ProviderCatalogContext): Promise<ProviderCatalogResult> {
   const explicitProvider = ctx.config.models?.providers?.[PORTAL_PROVIDER_ID];
-  const envApiKey = ctx.resolveProviderApiKey(PORTAL_PROVIDER_ID).apiKey;
-  const authStore = ensureAuthProfileStore(ctx.agentDir, {
-    allowKeychainPrompt: false,
+  const apiKeyAuth = ctx.resolveProviderApiKey(PORTAL_PROVIDER_ID);
+  const profileAuth = ctx.resolveProviderAuth(PORTAL_PROVIDER_ID, {
+    oauthMarker: MINIMAX_OAUTH_MARKER,
   });
-  const hasProfiles = listProfilesForProvider(authStore, PORTAL_PROVIDER_ID).length > 0;
   const explicitApiKey = normalizeOptionalString(explicitProvider?.apiKey);
-  const apiKey = envApiKey ?? explicitApiKey ?? (hasProfiles ? MINIMAX_OAUTH_MARKER : undefined);
+  let auth: ReturnType<ProviderCatalogContext["resolveProviderApiKey" | "resolveProviderAuth"]> =
+    apiKeyAuth.apiKey !== undefined
+      ? apiKeyAuth
+      : explicitApiKey
+        ? { apiKey: explicitApiKey }
+        : profileAuth;
+  const { apiKey } = auth;
   if (!apiKey) {
     return null;
   }
+  if (!normalizeOptionalString(auth.discoveryApiKey) && isNonSecretApiKeyMarker(apiKey)) {
+    // Legacy callbacks may omit material; only matching selection facts can complete it.
+    if (
+      auth.profileId &&
+      profileAuth.source === "profile" &&
+      auth.profileId === profileAuth.profileId &&
+      apiKey === profileAuth.apiKey &&
+      (auth.mode === undefined || auth.mode === profileAuth.mode)
+    ) {
+      auth = profileAuth;
+    }
+    if (!normalizeOptionalString(auth.discoveryApiKey)) {
+      return {
+        providers: {},
+        outcomes: [
+          { provider: PORTAL_PROVIDER_ID, profileId: auth.profileId, status: "unavailable" },
+        ],
+      };
+    }
+  }
+  const usesPortalBearerAuth =
+    apiKeyAuth.apiKey === "MINIMAX_OAUTH_TOKEN" ||
+    (apiKeyAuth.apiKey && apiKeyAuth.mode
+      ? apiKeyAuth.mode === "token" || apiKeyAuth.mode === "oauth"
+      : (profileAuth.mode === "token" && profileAuth.apiKey === apiKey) ||
+        (!apiKeyAuth.apiKey && !explicitApiKey && profileAuth.mode === "oauth"));
 
   const explicitBaseUrl = normalizeOptionalString(explicitProvider?.baseUrl);
 
-  return {
-    provider: buildPortalProviderCatalog({
-      baseUrl: explicitBaseUrl || buildMinimaxPortalProvider(ctx.env).baseUrl,
-      apiKey,
-    }),
-  };
+  const providerConfig = buildPortalProviderCatalog({
+    baseUrl: explicitBaseUrl || buildMinimaxPortalProvider(ctx.env).baseUrl,
+    apiKey,
+  });
+  return await buildOpenAICompatibleLiveProviderCatalog({
+    discoveryMode: "strict",
+    providerId: PORTAL_PROVIDER_ID,
+    providerConfig,
+    apiKey,
+    discoveryApiKey: auth.discoveryApiKey,
+    profileId: auth.profileId,
+    modelDiscovery: buildMinimaxModelDiscovery(
+      providerConfig,
+      usesPortalBearerAuth ? "oauth" : "api_key",
+    ),
+  });
 }
 
 function createOAuthHandler(region: MiniMaxRegion) {
   const defaultBaseUrl = getDefaultBaseUrl(region);
-  const regionLabel = resolveMinimaxRegionLabel(region);
+  const regionLabel = region === "cn" ? "CN" : "Global";
 
   return async (ctx: ProviderAuthContext): Promise<ProviderAuthResult> => {
     const progress = ctx.prompter.progress(`Starting MiniMax OAuth (${regionLabel})…`);
@@ -180,9 +212,12 @@ function createOAuthHandler(region: MiniMaxRegion) {
       const { loginMiniMaxPortalOAuth } = await import("./oauth.runtime.js");
       const result = await loginMiniMaxPortalOAuth({
         openUrl: ctx.openUrl,
-        note: ctx.prompter.note,
+        note: (message, title) => ctx.prompter.note(message, title),
+        deviceCode: ctx.prompter.deviceCode,
         progress,
         region,
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+        ...(ctx.assertCurrent ? { assertCurrent: ctx.assertCurrent } : {}),
       });
 
       progress.stop("MiniMax OAuth complete");
@@ -199,6 +234,7 @@ function createOAuthHandler(region: MiniMaxRegion) {
         access: result.access,
         refresh: result.refresh,
         expires: result.expires,
+        credentialExtra: { authFlow: "device-code" },
         configPatch: {
           models: {
             providers: {
@@ -241,14 +277,13 @@ function createOAuthHandler(region: MiniMaxRegion) {
 }
 
 function createMinimaxApiKeyMethod(region: MiniMaxRegion) {
-  const regionLabel = resolveMinimaxRegionLabel(region);
-  const endpointHint = resolveMinimaxEndpointHint(region);
+  const metadata = minimaxAuthMethodMetadata(region, "api_key");
   const isCn = region === "cn";
   return createProviderApiKeyAuthMethod({
     providerId: API_PROVIDER_ID,
-    methodId: isCn ? "api-cn" : "api-global",
-    label: `MiniMax API key (${regionLabel})`,
-    hint: endpointHint,
+    methodId: metadata.id,
+    label: metadata.label,
+    hint: metadata.hint,
     optionKey: "minimaxApiKey",
     flagName: "--minimax-api-key",
     envVar: "MINIMAX_API_KEY",
@@ -260,41 +295,20 @@ function createMinimaxApiKeyMethod(region: MiniMaxRegion) {
     defaultModel: apiModelRef(DEFAULT_MODEL),
     expectedProviders: isCn ? ["minimax", "minimax-cn"] : ["minimax"],
     applyConfig: (cfg) => (isCn ? applyMinimaxApiConfigCn(cfg) : applyMinimaxApiConfig(cfg)),
-    wizard: {
-      choiceId: isCn ? "minimax-cn-api" : "minimax-global-api",
-      choiceLabel: `MiniMax API key (${regionLabel})`,
-      choiceHint: endpointHint,
-      ...MINIMAX_WIZARD_GROUP,
-    },
+    wizard: metadata.wizard,
   });
 }
 
 function createMinimaxOAuthMethod(region: MiniMaxRegion) {
-  const regionLabel = resolveMinimaxRegionLabel(region);
-  const endpointHint = resolveMinimaxEndpointHint(region);
-  const isCn = region === "cn";
   return {
-    id: isCn ? "oauth-cn" : "oauth",
-    label: `MiniMax OAuth (${regionLabel})`,
-    hint: endpointHint,
-    kind: "device_code" as const,
-    wizard: {
-      choiceId: isCn ? "minimax-cn-oauth" : "minimax-global-oauth",
-      choiceLabel: `MiniMax OAuth (${regionLabel})`,
-      choiceHint: endpointHint,
-      ...MINIMAX_WIZARD_GROUP,
-    },
+    ...minimaxAuthMethodMetadata(region, "device_code"),
     run: createOAuthHandler(region),
   };
 }
 
 function buildMinimaxApiProviderPlugin(): ProviderPlugin {
   return {
-    id: API_PROVIDER_ID,
-    label: PROVIDER_LABEL,
-    hookAliases: ["minimax-cn"],
-    docsPath: "/providers/minimax",
-    envVars: ["MINIMAX_API_KEY"],
+    ...createMinimaxProvider(),
     auth: [createMinimaxApiKeyMethod("global"), createMinimaxApiKeyMethod("cn")],
     catalog: {
       order: "simple",
@@ -327,11 +341,7 @@ function buildMinimaxApiProviderPlugin(): ProviderPlugin {
 
 function buildMinimaxPortalProviderPlugin(): ProviderPlugin {
   return {
-    id: PORTAL_PROVIDER_ID,
-    label: PROVIDER_LABEL,
-    hookAliases: ["minimax-portal-cn"],
-    docsPath: "/providers/minimax",
-    envVars: ["MINIMAX_OAUTH_TOKEN", "MINIMAX_API_KEY"],
+    ...createMinimaxPortalProvider(),
     catalog: {
       run: async (ctx) => resolvePortalCatalog(ctx),
     },

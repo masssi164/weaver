@@ -1,17 +1,18 @@
-// Feishu plugin module implements media behavior.
 import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type * as Lark from "@larksuiteoapi/node-sdk";
-import type { MessageReceipt } from "openclaw/plugin-sdk/channel-outbound";
-import { mediaKindFromMime } from "openclaw/plugin-sdk/media-mime";
+import { detectMime, mediaKindFromMime } from "openclaw/plugin-sdk/media-mime";
 import {
+  buildOutboundMediaLoadOptions,
   MEDIA_FFMPEG_MAX_AUDIO_DURATION_SECS,
   runFfmpeg,
   runFfprobe,
+  type OutboundMediaAccess,
 } from "openclaw/plugin-sdk/media-runtime";
-import { saveMediaBuffer, saveMediaStream, type SavedMedia } from "openclaw/plugin-sdk/media-store";
-import { readRegularFile, writeExternalFileWithinRoot } from "openclaw/plugin-sdk/security-runtime";
+import { saveMediaBuffer, type SavedMedia } from "openclaw/plugin-sdk/media-store";
+import type { ReplyPayloadTtsSupplement } from "openclaw/plugin-sdk/reply-payload";
+import { writeExternalFileWithinRoot } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   resolvePreferredOpenClawTmpDir,
@@ -23,18 +24,36 @@ import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { requestFeishuApi } from "./comment-shared.js";
 import { normalizeFeishuExternalKey } from "./external-keys.js";
+import { saveMediaStreamWithIdleTimeout } from "./media-chunk-idle.js";
 import { getFeishuRuntime } from "./runtime.js";
-import {
-  assertFeishuMessageApiSuccess,
-  resolveFeishuReceiptKind,
-  toFeishuSendResult,
-} from "./send-result.js";
+import { runBeforeFeishuMessageDispatch } from "./send-context.js";
 import { resolveFeishuSendTarget } from "./send-target.js";
+import { sendReplyOrFallbackDirect } from "./send.js";
+import type { FeishuSendResult } from "./types.js";
 
 const FEISHU_MEDIA_HTTP_TIMEOUT_MS = 120_000;
+const FEISHU_MAX_FILE_UPLOAD_BYTES = 30 * 1024 * 1024;
+const FEISHU_MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024;
 const FEISHU_VOICE_FILE_NAME = "voice.ogg";
 const FEISHU_VOICE_SAMPLE_RATE_HZ = 48_000;
 const FEISHU_VOICE_BITRATE = "64k";
+
+const FEISHU_SUPPORTED_IMAGE_CONTENT_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+  "image/x-ms-bmp",
+  "image/tiff",
+  "image/tif",
+  // The platform accepts HEIC even though older generated SDK comments omit it.
+  "image/heic",
+  "image/x-icon",
+  "image/ico",
+  "image/vnd.microsoft.icon",
+]);
 
 const FEISHU_TRANSCODABLE_AUDIO_EXTS = new Set([
   ".aac",
@@ -119,10 +138,7 @@ function extractFeishuUploadKey(
     );
   }
 
-  const key =
-    params.key === "image_key"
-      ? (wrappedResponse.image_key ?? wrappedResponse.data?.image_key)
-      : (wrappedResponse.file_key ?? wrappedResponse.data?.file_key);
+  const key = wrappedResponse[params.key] ?? wrappedResponse.data?.[params.key];
   if (!key) {
     throw new Error(`${params.errorPrefix}: no ${params.key} returned`);
   }
@@ -168,10 +184,6 @@ function readHttpStatusFromError(error: unknown): number | undefined {
 
   const status = (error as { status?: unknown }).status;
   return typeof status === "number" ? status : undefined;
-}
-
-function isHttpStatusError(error: unknown, status: number): boolean {
-  return readHttpStatusFromError(error) === status;
 }
 
 function containsEastAsianScript(value: string): boolean {
@@ -271,32 +283,26 @@ async function saveFeishuResponseMedia(params: {
     );
   }
 
-  if (responseWithOptionalFields.data && Buffer.isBuffer(responseWithOptionalFields.data)) {
+  const data = responseWithOptionalFields.data;
+  if (Buffer.isBuffer(data) || data instanceof ArrayBuffer) {
     return saveMediaBuffer(
-      responseWithOptionalFields.data,
+      Buffer.isBuffer(data) ? data : Buffer.from(data),
       contentType,
       "inbound",
       maxBytes,
       fileName,
     );
   }
-  if (responseWithOptionalFields.data instanceof ArrayBuffer) {
-    return saveMediaBuffer(
-      Buffer.from(responseWithOptionalFields.data),
+  const save = (stream: AsyncIterable<unknown>) =>
+    saveMediaStreamWithIdleTimeout(
+      stream,
       contentType,
-      "inbound",
       maxBytes,
       fileName,
+      FEISHU_MEDIA_HTTP_TIMEOUT_MS,
     );
-  }
   if (typeof response.getReadableStream === "function") {
-    return saveMediaStream(
-      response.getReadableStream(),
-      contentType,
-      "inbound",
-      maxBytes,
-      fileName,
-    );
+    return save(response.getReadableStream());
   }
   if (typeof response.writeFile === "function") {
     return await withTempDownloadPath({ prefix: params.tmpDirPrefix }, async (tmpPath) => {
@@ -305,21 +311,14 @@ async function saveFeishuResponseMedia(params: {
       if (stat.size > maxBytes) {
         throw mediaLimitError(maxBytes);
       }
-      return await saveMediaStream(
-        fs.createReadStream(tmpPath),
-        contentType,
-        "inbound",
-        maxBytes,
-        fileName,
-      );
+      return await save(fs.createReadStream(tmpPath));
     });
   }
   if (responseWithOptionalFields[Symbol.asyncIterator]) {
-    const asyncIterable = responseWithOptionalFields as AsyncIterable<Buffer | Uint8Array | string>;
-    return saveMediaStream(asyncIterable, contentType, "inbound", maxBytes, fileName);
+    return save(responseWithOptionalFields as AsyncIterable<Buffer | Uint8Array | string>);
   }
   if (response instanceof Readable) {
-    return saveMediaStream(response, contentType, "inbound", maxBytes, fileName);
+    return save(response);
   }
 
   const keys = Object.keys(response as object);
@@ -369,87 +368,57 @@ export async function saveMessageResourceFeishu(params: {
     throw new Error("Feishu message resource download failed: invalid file_key");
   }
   const { client } = createConfiguredFeishuMediaClient({ cfg, accountId });
+  const request = {
+    client,
+    messageId,
+    fileKey: normalizedFileKey,
+    type,
+    maxBytes,
+    originalFilename,
+  };
 
   try {
-    return await saveMessageResourceWithType({
-      client,
-      messageId,
-      fileKey: normalizedFileKey,
-      type,
-      maxBytes,
-      originalFilename,
-    });
+    return await saveMessageResourceWithType(request);
   } catch (err) {
-    if (type !== "file" || !isHttpStatusError(err, 502)) {
+    if (type !== "file" || readHttpStatusFromError(err) !== 502) {
       throw err;
     }
     try {
-      return await saveMessageResourceWithType({
-        client,
-        messageId,
-        fileKey: normalizedFileKey,
-        type: "media",
-        maxBytes,
-        originalFilename,
-      });
+      return await saveMessageResourceWithType({ ...request, type: "media" });
     } catch {
       throw err;
     }
   }
 }
 
-type UploadImageResult = {
-  imageKey: string;
-};
-
-type UploadFileResult = {
-  fileKey: string;
-};
-
-export type SendMediaResult = {
-  messageId: string;
-  chatId: string;
-  receipt: MessageReceipt;
+export type SendMediaResult = FeishuSendResult & {
   voiceIntentDegradedToFile?: boolean;
 };
 
-/**
- * Upload an image to Feishu and get an image_key for sending.
- * Supports: JPEG, PNG, WEBP, GIF, TIFF, BMP, ICO
- */
 async function uploadImageFeishu(params: {
   cfg: ClawdbotConfig;
-  image: Buffer | string; // Buffer or file path
-  imageType?: "message" | "avatar";
+  image: Buffer;
   accountId?: string;
-}): Promise<UploadImageResult> {
-  const { cfg, image, imageType = "message", accountId } = params;
+}): Promise<string> {
+  const { cfg, image, accountId } = params;
   const { client } = createConfiguredFeishuMediaClient({ cfg, accountId });
-
-  // SDK accepts Buffer directly. Keep string path support on this helper, but
-  // verify the path as a regular local file before uploading it.
-  // See: https://github.com/larksuite/node-sdk/issues/121
-  const imageData =
-    typeof image === "string" ? (await readRegularFile({ filePath: image })).buffer : image;
 
   const response = await requestFeishuApi(
     () =>
       client.im.image.create({
         data: {
-          image_type: imageType,
-          image: imageData,
+          image_type: "message",
+          image,
         },
       }),
     "Feishu image upload failed",
     { includeNestedErrorLogId: true },
   );
 
-  return {
-    imageKey: extractFeishuUploadKey(response, {
-      key: "image_key",
-      errorPrefix: "Feishu image upload failed",
-    }),
-  };
+  return extractFeishuUploadKey(response, {
+    key: "image_key",
+    errorPrefix: "Feishu image upload failed",
+  });
 }
 
 /**
@@ -462,30 +431,20 @@ async function uploadImageFeishu(params: {
  * NOT decode percent-encoding — so encoded filenames appeared as garbled text
  * in chat (regression in v2026.3.2).
  */
-export function sanitizeFileNameForUpload(fileName: string): string {
+function sanitizeFileNameForUpload(fileName: string): string {
   return fileName.replace(/[\p{Cc}"\\]/gu, "_");
 }
 
-/**
- * Upload a file to Feishu and get a file_key for sending.
- * Max file size: 30MB
- */
 async function uploadFileFeishu(params: {
   cfg: ClawdbotConfig;
-  file: Buffer | string; // Buffer or file path
+  file: Buffer;
   fileName: string;
   fileType: "opus" | "mp4" | "pdf" | "doc" | "xls" | "ppt" | "stream";
   duration?: number; // Audio/video duration, in milliseconds.
   accountId?: string;
-}): Promise<UploadFileResult> {
+}): Promise<string> {
   const { cfg, file, fileName, fileType, duration, accountId } = params;
   const { client } = createConfiguredFeishuMediaClient({ cfg, accountId });
-
-  // SDK accepts Buffer directly. Keep string path support on this helper, but
-  // verify the path as a regular local file before uploading it.
-  // See: https://github.com/larksuite/node-sdk/issues/121
-  const fileData =
-    typeof file === "string" ? (await readRegularFile({ filePath: file })).buffer : file;
 
   const safeFileName = sanitizeFileNameForUpload(fileName);
 
@@ -495,7 +454,7 @@ async function uploadFileFeishu(params: {
         data: {
           file_type: fileType,
           file_name: safeFileName,
-          file: fileData,
+          file,
           ...(duration !== undefined ? { duration } : {}),
         },
       }),
@@ -503,128 +462,48 @@ async function uploadFileFeishu(params: {
     { includeNestedErrorLogId: true },
   );
 
-  return {
-    fileKey: extractFeishuUploadKey(response, {
-      key: "file_key",
-      errorPrefix: "Feishu file upload failed",
-    }),
-  };
+  return extractFeishuUploadKey(response, {
+    key: "file_key",
+    errorPrefix: "Feishu file upload failed",
+  });
 }
 
-/**
- * Send an image message using an image_key
- */
-async function sendImageFeishu(params: {
+type SendUploadedMediaParams = {
   cfg: ClawdbotConfig;
   to: string;
-  imageKey: string;
   replyToMessageId?: string;
   replyInThread?: boolean;
+  allowTopLevelReplyFallback?: boolean;
   accountId?: string;
-}): Promise<SendMediaResult> {
-  const { cfg, to, imageKey, replyToMessageId, replyInThread, accountId } = params;
-  const { client, receiveId, receiveIdType } = resolveFeishuSendTarget({
-    cfg,
-    to,
-    accountId,
+};
+
+async function sendUploadedMediaFeishu(
+  params: SendUploadedMediaParams,
+  media: { image_key: string } | { file_key: string },
+  msgType: "image" | "file" | "audio" | "media" | "sticker",
+): Promise<SendMediaResult> {
+  const { client, receiveId, receiveIdType } = resolveFeishuSendTarget(params);
+  const content = JSON.stringify(media);
+  const label = msgType === "image" ? "image" : "file";
+  return sendReplyOrFallbackDirect(client, {
+    replyToMessageId: params.replyToMessageId,
+    replyInThread: params.replyInThread,
+    allowTopLevelReplyFallback: params.allowTopLevelReplyFallback,
+    content,
+    msgType,
+    directParams: { receiveId, receiveIdType, content, msgType },
+    directErrorPrefix: `Feishu ${label} send failed`,
+    replyErrorPrefix: `Feishu ${label} reply failed`,
   });
-  const content = JSON.stringify({ image_key: imageKey });
-
-  if (replyToMessageId) {
-    const response = await requestFeishuApi(
-      () =>
-        client.im.message.reply({
-          path: { message_id: replyToMessageId },
-          data: {
-            content,
-            msg_type: "image",
-            ...(replyInThread ? { reply_in_thread: true } : {}),
-          },
-        }),
-      "Feishu image reply failed",
-      { includeNestedErrorLogId: true },
-    );
-    assertFeishuMessageApiSuccess(response, "Feishu image reply failed");
-    return toFeishuSendResult(response, receiveId, "media");
-  }
-
-  const response = await requestFeishuApi(
-    () =>
-      client.im.message.create({
-        params: { receive_id_type: receiveIdType },
-        data: {
-          receive_id: receiveId,
-          content,
-          msg_type: "image",
-        },
-      }),
-    "Feishu image send failed",
-    { includeNestedErrorLogId: true },
-  );
-  assertFeishuMessageApiSuccess(response, "Feishu image send failed");
-  return toFeishuSendResult(response, receiveId, "media");
 }
 
-/**
- * Send a file message using a file_key
- */
-async function sendFileFeishu(params: {
-  cfg: ClawdbotConfig;
-  to: string;
-  fileKey: string;
-  /** Use "audio" for audio, "media" for video (mp4), "file" for documents */
-  msgType?: "file" | "audio" | "media";
-  replyToMessageId?: string;
-  replyInThread?: boolean;
-  accountId?: string;
-}): Promise<SendMediaResult> {
-  const { cfg, to, fileKey, replyToMessageId, replyInThread, accountId } = params;
-  const msgType = params.msgType ?? "file";
-  const { client, receiveId, receiveIdType } = resolveFeishuSendTarget({
-    cfg,
-    to,
-    accountId,
-  });
-  const content = JSON.stringify({ file_key: fileKey });
-
-  if (replyToMessageId) {
-    const response = await requestFeishuApi(
-      () =>
-        client.im.message.reply({
-          path: { message_id: replyToMessageId },
-          data: {
-            content,
-            msg_type: msgType,
-            ...(replyInThread ? { reply_in_thread: true } : {}),
-          },
-        }),
-      "Feishu file reply failed",
-      { includeNestedErrorLogId: true },
-    );
-    assertFeishuMessageApiSuccess(response, "Feishu file reply failed");
-    return toFeishuSendResult(response, receiveId, resolveFeishuReceiptKind(msgType));
-  }
-
-  const response = await requestFeishuApi(
-    () =>
-      client.im.message.create({
-        params: { receive_id_type: receiveIdType },
-        data: {
-          receive_id: receiveId,
-          content,
-          msg_type: msgType,
-        },
-      }),
-    "Feishu file send failed",
-    { includeNestedErrorLogId: true },
-  );
-  assertFeishuMessageApiSuccess(response, "Feishu file send failed");
-  return toFeishuSendResult(response, receiveId, resolveFeishuReceiptKind(msgType));
+// Feishu only permits reusing sticker file_keys already received by this bot.
+export function sendStickerFeishu(
+  params: SendUploadedMediaParams & { fileKey: string },
+): Promise<SendMediaResult> {
+  return sendUploadedMediaFeishu(params, { file_key: params.fileKey }, "sticker");
 }
 
-/**
- * Helper to detect file type from extension
- */
 function detectFileType(
   fileName: string,
 ): "opus" | "mp4" | "pdf" | "doc" | "xls" | "ppt" | "stream" {
@@ -653,18 +532,22 @@ function detectFileType(
   }
 }
 
-function resolveFeishuOutboundMediaKind(params: { fileName: string; contentType?: string }): {
+type FeishuMedia = {
+  buffer: Buffer;
+  fileName: string;
+  contentType?: string;
+};
+
+async function resolveFeishuOutboundMediaKind(params: FeishuMedia): Promise<{
   fileType?: "opus" | "mp4" | "pdf" | "doc" | "xls" | "ppt" | "stream";
   msgType: "image" | "file" | "audio" | "media";
-} {
-  const { fileName, contentType } = params;
+}> {
+  const { buffer, fileName, contentType } = params;
   const ext = normalizeLowercaseStringOrEmpty(path.extname(fileName));
-  const mimeKind = mediaKindFromMime(contentType);
-
-  const isImageExt = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".tiff"].includes(
-    ext,
-  );
-  if (isImageExt || mimeKind === "image") {
+  // Never pass a filename to signature detection: an image-looking name must not
+  // disguise SVG, AVIF, documents, or unrecognized bytes as native Feishu images.
+  const detectedContentType = (await detectMime({ buffer })) ?? "";
+  if (FEISHU_SUPPORTED_IMAGE_CONTENT_TYPES.has(detectedContentType)) {
     return { msgType: "image" };
   }
 
@@ -686,18 +569,25 @@ function resolveFeishuOutboundMediaKind(params: { fileName: string; contentType?
     return { fileType: "mp4", msgType: "media" };
   }
 
-  const fileType = detectFileType(fileName);
-  return {
-    fileType,
-    msgType:
-      fileType === "stream"
-        ? "file"
-        : fileType === "opus"
-          ? "audio"
-          : fileType === "mp4"
-            ? "media"
-            : "file",
-  };
+  return { fileType: detectFileType(fileName), msgType: "file" };
+}
+
+function assertFeishuUploadWithinEnvelope(params: {
+  buffer: Buffer;
+  mediaMaxBytes: number;
+  msgType: "image" | "file" | "audio" | "media";
+}): void {
+  if (params.buffer.byteLength === 0) {
+    throw new Error("Feishu attachments cannot be empty");
+  }
+  const maxBytes =
+    params.msgType === "image"
+      ? Math.min(params.mediaMaxBytes, FEISHU_MAX_IMAGE_UPLOAD_BYTES)
+      : params.mediaMaxBytes;
+  if (params.buffer.byteLength > maxBytes) {
+    const label = params.msgType === "image" ? "image" : "file";
+    throw new Error(`Feishu ${label} exceeds its ${String(maxBytes)}-byte upload limit`);
+  }
 }
 
 function isFeishuNativeVoiceAudio(params: { fileName: string; contentType?: string }): boolean {
@@ -721,10 +611,18 @@ export function shouldSuppressFeishuTextForVoiceMedia(params: {
   fileName?: string;
   contentType?: string;
   audioAsVoice?: boolean;
+  ttsSupplement?: ReplyPayloadTtsSupplement;
 }): boolean {
+  // TTS metadata owns visibility; voice-bubble inference must not hide text
+  // that has not been delivered yet.
+  if (params.ttsSupplement) {
+    return params.ttsSupplement.visibleTextAlreadyDelivered === true;
+  }
+
   if (params.audioAsVoice === true) {
     return true;
   }
+
   if (
     params.fileName &&
     isFeishuNativeVoiceAudio({
@@ -749,11 +647,9 @@ function isLikelyTranscodableAudio(params: { fileName: string; contentType?: str
   return FEISHU_TRANSCODABLE_AUDIO_EXTS.has(ext) || mediaKindFromMime(contentType) === "audio";
 }
 
-async function transcodeToFeishuVoiceOpus(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-}): Promise<{ buffer: Buffer; fileName: string; contentType: string }> {
+async function transcodeToFeishuVoiceOpus(
+  params: FeishuMedia,
+): Promise<FeishuMedia & { contentType: string }> {
   return await withTempWorkspace(
     { rootDir: resolvePreferredOpenClawTmpDir(), prefix: "feishu-voice-" },
     async (workspace) => {
@@ -799,12 +695,9 @@ async function transcodeToFeishuVoiceOpus(params: {
   );
 }
 
-async function prepareFeishuVoiceMedia(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-  audioAsVoice?: boolean;
-}): Promise<{ buffer: Buffer; fileName: string; contentType?: string }> {
+async function prepareFeishuVoiceMedia(
+  params: FeishuMedia & { audioAsVoice?: boolean },
+): Promise<FeishuMedia> {
   if (isFeishuNativeVoiceAudio(params)) {
     return params;
   }
@@ -822,11 +715,7 @@ async function prepareFeishuVoiceMedia(params: {
   }
 }
 
-async function probeMediaDurationMs(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-}): Promise<number | undefined> {
+async function probeMediaDurationMs(params: FeishuMedia): Promise<number | undefined> {
   try {
     return await withTempWorkspace(
       { rootDir: resolvePreferredOpenClawTmpDir(), prefix: "feishu-media-probe-" },
@@ -856,128 +745,119 @@ async function probeMediaDurationMs(params: {
   }
 }
 
-async function maybeProbeUploadDurationMs(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-  msgType: "file" | "audio" | "media";
-}): Promise<number | undefined> {
-  if (params.msgType !== "audio" && params.msgType !== "media") {
-    return undefined;
-  }
-  return await probeMediaDurationMs(params);
-}
-
 /**
  * Upload and send media (image or file) from URL, local path, or buffer.
- * When mediaUrl is a local path, mediaLocalRoots (from core outbound context)
- * must be passed so loadWebMedia allows the path (post CVE-2026-26321).
+ * Local paths require host-owned mediaAccess or approved legacy roots/readers.
  */
-export async function sendMediaFeishu(params: {
-  cfg: ClawdbotConfig;
-  to: string;
-  mediaUrl?: string;
-  mediaBuffer?: Buffer;
-  fileName?: string;
-  replyToMessageId?: string;
-  replyInThread?: boolean;
-  accountId?: string;
-  /** Allowed roots for local path reads; required for local filePath to work. */
-  mediaLocalRoots?: readonly string[];
-  /** When true, transcode compatible audio to Feishu native Ogg/Opus voice bubbles. */
-  audioAsVoice?: boolean;
-}): Promise<SendMediaResult> {
-  const {
-    cfg,
-    to,
-    mediaUrl,
-    mediaBuffer,
-    fileName,
-    replyToMessageId,
-    replyInThread,
-    accountId,
-    mediaLocalRoots,
-    audioAsVoice,
-  } = params;
-  const account = resolveFeishuRuntimeAccount({ cfg, accountId });
-  if (!account.configured) {
-    throw new Error(`Feishu account "${account.accountId}" not configured`);
-  }
-  const mediaMaxBytes = (account.config?.mediaMaxMb ?? 30) * 1024 * 1024;
-
-  let buffer: Buffer;
-  let name: string;
-  let contentType: string | undefined;
-
-  if (mediaBuffer) {
-    buffer = mediaBuffer;
-    name = fileName ?? "file";
-  } else if (mediaUrl) {
-    const loaded = await getFeishuRuntime().media.loadWebMedia(mediaUrl, {
-      maxBytes: mediaMaxBytes,
-      optimizeImages: false,
-      localRoots: mediaLocalRoots?.length ? mediaLocalRoots : undefined,
-    });
-    buffer = loaded.buffer;
-    name = fileName ?? loaded.fileName ?? "file";
-    contentType = loaded.contentType;
-  } else {
-    throw new Error("Either mediaUrl or mediaBuffer must be provided");
-  }
-
-  const prepared = await prepareFeishuVoiceMedia({
-    buffer,
-    fileName: name,
-    contentType,
-    audioAsVoice,
+export async function sendMediaFeishu(
+  params: SendUploadedMediaParams & {
+    mediaUrl?: string;
+    mediaBuffer?: Buffer;
+    fileName?: string;
+    mediaAccess?: OutboundMediaAccess;
+    /** Allowed roots for local path reads; required for local filePath to work. */
+    mediaLocalRoots?: readonly string[];
+    mediaReadFile?: OutboundMediaAccess["readFile"];
+    /** When true, transcode compatible audio to Feishu native Ogg/Opus voice bubbles. */
+    audioAsVoice?: boolean;
+  },
+): Promise<SendMediaResult> {
+  const { cfg, mediaUrl, mediaBuffer, fileName, accountId, mediaLocalRoots, audioAsVoice } = params;
+  const account = await runBeforeFeishuMessageDispatch(() => {
+    const resolved = resolveFeishuRuntimeAccount({ cfg, accountId });
+    if (!resolved.configured) {
+      throw new Error(`Feishu account "${resolved.accountId}" not configured`);
+    }
+    return resolved;
   });
-  buffer = prepared.buffer;
-  name = prepared.fileName;
-  contentType = prepared.contentType;
+  const mediaMaxBytes = Math.min(
+    (account.config?.mediaMaxMb ?? 30) * 1024 * 1024,
+    FEISHU_MAX_FILE_UPLOAD_BYTES,
+  );
 
-  const routing = resolveFeishuOutboundMediaKind({ fileName: name, contentType });
-  const voiceIntentDegradedToFile = audioAsVoice === true && routing.msgType !== "audio";
+  const loaded = await runBeforeFeishuMessageDispatch(async () => {
+    if (mediaBuffer) {
+      return { buffer: mediaBuffer, fileName: fileName ?? "file", contentType: undefined };
+    }
+    if (mediaUrl) {
+      const media = await getFeishuRuntime().media.loadWebMedia(
+        mediaUrl,
+        buildOutboundMediaLoadOptions({
+          maxBytes: mediaMaxBytes,
+          mediaAccess: params.mediaAccess,
+          mediaLocalRoots,
+          mediaReadFile: params.mediaReadFile,
+          optimizeImages: false,
+        }),
+      );
+      return {
+        buffer: media.buffer,
+        fileName: fileName ?? media.fileName ?? "file",
+        contentType: media.contentType,
+      };
+    }
+    throw new Error("Either mediaUrl or mediaBuffer must be provided");
+  });
+  const loadedRouting = await runBeforeFeishuMessageDispatch(() =>
+    resolveFeishuOutboundMediaKind(loaded),
+  );
+  await runBeforeFeishuMessageDispatch(() =>
+    assertFeishuUploadWithinEnvelope({
+      buffer: loaded.buffer,
+      mediaMaxBytes,
+      msgType: loadedRouting.msgType,
+    }),
+  );
+
+  const prepared = await runBeforeFeishuMessageDispatch(() =>
+    prepareFeishuVoiceMedia({ ...loaded, audioAsVoice }),
+  );
+  const { buffer, fileName: name, contentType } = prepared;
+
+  const routing =
+    prepared.buffer === loaded.buffer &&
+    prepared.fileName === loaded.fileName &&
+    prepared.contentType === loaded.contentType
+      ? loadedRouting
+      : await runBeforeFeishuMessageDispatch(() =>
+          resolveFeishuOutboundMediaKind({ buffer, fileName: name, contentType }),
+        );
+  const voiceIntentDegradedToFile =
+    routing.msgType !== "audio" &&
+    shouldSuppressFeishuTextForVoiceMedia({ mediaUrl, audioAsVoice });
+
+  await runBeforeFeishuMessageDispatch(() =>
+    assertFeishuUploadWithinEnvelope({ buffer, mediaMaxBytes, msgType: routing.msgType }),
+  );
 
   if (routing.msgType === "image") {
-    const { imageKey } = await uploadImageFeishu({ cfg, image: buffer, accountId });
-    const result = await sendImageFeishu({
-      cfg,
-      to,
-      imageKey,
-      replyToMessageId,
-      replyInThread,
-      accountId,
-    });
+    const imageKey = await runBeforeFeishuMessageDispatch(() =>
+      uploadImageFeishu({ cfg, image: buffer, accountId }),
+    );
+    const result = await sendUploadedMediaFeishu(params, { image_key: imageKey }, "image");
     return {
       ...result,
       ...(voiceIntentDegradedToFile ? { voiceIntentDegradedToFile: true } : {}),
     };
   }
-  const durationMs = await maybeProbeUploadDurationMs({
-    buffer,
-    fileName: name,
-    contentType,
-    msgType: routing.msgType,
-  });
-  const { fileKey } = await uploadFileFeishu({
-    cfg,
-    file: buffer,
-    fileName: name,
-    fileType: routing.fileType ?? "stream",
-    ...(durationMs !== undefined ? { duration: durationMs } : {}),
-    accountId,
-  });
-  const result = await sendFileFeishu({
-    cfg,
-    to,
-    fileKey,
-    msgType: routing.msgType,
-    replyToMessageId,
-    replyInThread,
-    accountId,
-  });
+  const durationMs =
+    routing.msgType === "audio" || routing.msgType === "media"
+      ? await probeMediaDurationMs({ buffer, fileName: name, contentType })
+      : undefined;
+  const fileKey = await runBeforeFeishuMessageDispatch(() =>
+    uploadFileFeishu({
+      cfg,
+      file: buffer,
+      fileName: name,
+      fileType: routing.fileType ?? "stream",
+      ...(durationMs !== undefined ? { duration: durationMs } : {}),
+      accountId,
+    }),
+  );
+  const result = await sendUploadedMediaFeishu(params, { file_key: fileKey }, routing.msgType);
   return {
     ...result,
     ...(voiceIntentDegradedToFile ? { voiceIntentDegradedToFile: true } : {}),
   };
 }
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

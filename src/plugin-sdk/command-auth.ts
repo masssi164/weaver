@@ -4,11 +4,6 @@
  * instead of this broad compatibility surface.
  */
 
-import {
-  buildCommandsMessage as buildCommandsMessageCompat,
-  buildCommandsMessagePaginated as buildCommandsMessagePaginatedCompat,
-  buildHelpMessage as buildHelpMessageCompat,
-} from "../auto-reply/command-status-builders.js";
 import type { ChannelId } from "../channels/plugins/types.public.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
@@ -104,10 +99,10 @@ export {
   buildModelsProviderData,
   formatModelsAvailableHeader,
   resolveModelsCommandReply,
-} from "../auto-reply/reply/commands-models.js";
-export type { ModelsProviderData } from "../auto-reply/reply/commands-models.js";
-export { resolveStoredModelOverride } from "../auto-reply/reply/stored-model-override.js";
-export type { StoredModelOverride } from "../auto-reply/reply/stored-model-override.js";
+} from "./models-provider-runtime.js";
+export type { ModelsProviderData } from "../auto-reply/reply/commands-models-catalog.js";
+export { resolveStoredModelOverride } from "../sessions/stored-model-overrides.js";
+export type { StoredModelOverride } from "../sessions/stored-model-overrides.js";
 
 /**
  * Inputs for legacy sender command authorization.
@@ -226,36 +221,22 @@ export async function resolveSenderCommandAuthorization(
   let configuredGroupAllowFrom = params.configuredGroupAllowFrom ?? [];
   let dmStoreAllowFrom = storeAllowFrom;
   if (channel) {
-    [configuredAllowFrom, configuredGroupAllowFrom] = await Promise.all([
+    const expand = (allowFrom: string[]) =>
       expandAllowFromWithAccessGroups({
         cfg: params.cfg,
-        allowFrom: params.configuredAllowFrom,
-        channel,
-        accountId,
-        senderId: params.senderId,
-        isSenderAllowed: params.isSenderAllowed,
-        resolveMembership: params.resolveAccessGroupMembership,
-      }),
-      expandAllowFromWithAccessGroups({
-        cfg: params.cfg,
-        allowFrom: params.configuredGroupAllowFrom ?? [],
-        channel,
-        accountId,
-        senderId: params.senderId,
-        isSenderAllowed: params.isSenderAllowed,
-        resolveMembership: params.resolveAccessGroupMembership,
-      }),
-    ]);
-    if (!params.isGroup) {
-      dmStoreAllowFrom = await expandAllowFromWithAccessGroups({
-        cfg: params.cfg,
-        allowFrom: storeAllowFrom,
+        allowFrom,
         channel,
         accountId,
         senderId: params.senderId,
         isSenderAllowed: params.isSenderAllowed,
         resolveMembership: params.resolveAccessGroupMembership,
       });
+    [configuredAllowFrom, configuredGroupAllowFrom] = await Promise.all([
+      expand(params.configuredAllowFrom),
+      expand(params.configuredGroupAllowFrom ?? []),
+    ]);
+    if (!params.isGroup) {
+      dmStoreAllowFrom = await expand(storeAllowFrom);
     }
   }
   const access = resolveDmGroupAccessWithLists({
@@ -269,7 +250,6 @@ export async function resolveSenderCommandAuthorization(
   });
   const effectiveAllowFrom = access.effectiveAllowFrom;
   const effectiveGroupAllowFrom = access.effectiveGroupAllowFrom;
-  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
   const senderAllowedForCommands = params.isSenderAllowed(
     params.senderId,
     params.isGroup ? effectiveGroupAllowFrom : effectiveAllowFrom,
@@ -278,7 +258,7 @@ export async function resolveSenderCommandAuthorization(
   const groupAllowedForCommands = params.isSenderAllowed(params.senderId, effectiveGroupAllowFrom);
   const commandAuthorized = shouldComputeAuth
     ? (params.resolveCommandAuthorizedFromAuthorizers?.({
-        useAccessGroups,
+        useAccessGroups: true,
         authorizers: [
           { configured: effectiveAllowFrom.length > 0, allowed: ownerAllowedForCommands },
           { configured: effectiveGroupAllowFrom.length > 0, allowed: groupAllowedForCommands },
@@ -293,25 +273,4 @@ export async function resolveSenderCommandAuthorization(
     senderAllowedForCommands,
     commandAuthorized,
   };
-}
-
-/** @deprecated Use `openclaw/plugin-sdk/command-status` instead. */
-export function buildCommandsMessage(
-  ...args: Parameters<typeof buildCommandsMessageCompat>
-): ReturnType<typeof buildCommandsMessageCompat> {
-  return buildCommandsMessageCompat(...args);
-}
-
-/** @deprecated Use `openclaw/plugin-sdk/command-status` instead. */
-export function buildCommandsMessagePaginated(
-  ...args: Parameters<typeof buildCommandsMessagePaginatedCompat>
-): ReturnType<typeof buildCommandsMessagePaginatedCompat> {
-  return buildCommandsMessagePaginatedCompat(...args);
-}
-
-/** @deprecated Use `openclaw/plugin-sdk/command-status` instead. */
-export function buildHelpMessage(
-  ...args: Parameters<typeof buildHelpMessageCompat>
-): ReturnType<typeof buildHelpMessageCompat> {
-  return buildHelpMessageCompat(...args);
 }

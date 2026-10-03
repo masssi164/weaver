@@ -6,20 +6,20 @@ import { normalizeAccountId, normalizeAgentId } from "./session-key.js";
 
 // Route binding scopes constrain a configured agent/account binding to a guild,
 // team, group space, and optionally channel/platform role ids.
-export type RouteBindingScopeConstraint = {
+type RouteBindingScopeConstraint = {
   guildId?: string | null;
   teamId?: string | null;
   roles?: string[] | null;
 };
 
-export type RouteBindingScope = {
+type RouteBindingScope = {
   guildId?: string | null;
   teamId?: string | null;
   groupSpace?: string | null;
   memberRoleIds?: Iterable<string> | null;
 };
 
-export type NormalizedRouteBindingMatch = {
+type NormalizedRouteBindingMatch = {
   agentId: string;
   accountId: string;
   channelId: string;
@@ -40,18 +40,14 @@ export function normalizeRouteBindingRoles(value: string[] | null | undefined): 
 }
 
 export function normalizeRouteBindingChannelId(raw?: string | null): string | null {
-  const normalized = normalizeChatChannelId(raw);
-  if (normalized) {
-    return normalized;
-  }
-  const fallback = normalizeLowercaseStringOrEmpty(raw);
-  return fallback || null;
+  return normalizeChatChannelId(raw) || normalizeLowercaseStringOrEmpty(raw) || null;
 }
 
 // Convert a binding match into the same canonical ids used by session routing.
-// Wildcard/malformed account matches are ignored because they are not concrete.
+// Diagnostics include implicit defaults; outbound account selection requires explicit bindings.
 export function resolveNormalizedRouteBindingMatch(
   binding: AgentRouteBinding,
+  options?: { includeImplicitDefaultAccount?: boolean },
 ): NormalizedRouteBindingMatch | null {
   if (!binding || typeof binding !== "object") {
     return null;
@@ -64,8 +60,11 @@ export function resolveNormalizedRouteBindingMatch(
   if (!channelId) {
     return null;
   }
-  const accountId = typeof match.accountId === "string" ? match.accountId.trim() : "";
-  if (!accountId || accountId === "*") {
+  if (match.accountId !== undefined && typeof match.accountId !== "string") {
+    return null;
+  }
+  const accountId = match.accountId?.trim();
+  if (accountId === "*" || (!accountId && !options?.includeImplicitDefaultAccount)) {
     return null;
   }
   return {

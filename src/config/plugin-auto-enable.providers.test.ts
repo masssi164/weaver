@@ -9,6 +9,7 @@ import {
   makeRegistry,
   resetPluginAutoEnableTestState,
 } from "./plugin-auto-enable.test-helpers.js";
+import type { OpenClawConfig } from "./types.openclaw.js";
 
 const env = makeIsolatedEnv();
 
@@ -17,138 +18,48 @@ afterAll(() => {
 });
 
 describe("applyPluginAutoEnable providers", () => {
-  it("auto-enables provider auth plugins when profiles exist", () => {
+  it.each([
+    { label: "default", agents: { defaults: { decisionModel: "judge/fast" } } },
+    { label: "agent override", agents: { entries: { worker: { decisionModel: "judge/fast" } } } },
+  ])("activates a decision contract owner selected by $label", ({ agents }) => {
     const result = applyPluginAutoEnable({
-      config: {
-        auth: {
-          profiles: {
-            "google-gemini-cli:default": {
-              provider: "google-gemini-cli",
-              mode: "oauth",
-            },
-          },
-        },
-      },
+      config: { agents, plugins: { allow: ["telegram"] } },
       env,
       manifestRegistry: makeRegistry([
         {
-          id: "google",
+          id: "decision-plugin",
           channels: [],
-          autoEnableWhenConfiguredProviders: ["google-gemini-cli"],
+          origin: "bundled",
+          contracts: { decisionProviders: ["judge"] },
         },
       ]),
     });
-
-    expect(result.config.plugins?.entries?.google?.enabled).toBe(true);
+    expect(result.config.plugins?.entries?.["decision-plugin"]?.enabled).toBe(true);
+    expect(result.config.plugins?.allow).toEqual(["telegram", "decision-plugin"]);
+    expect(result.autoEnabledReasons).toEqual({
+      "decision-plugin": ["judge decision provider selected"],
+    });
   });
 
-  it("auto-enables provider plugins when plugin-owned web search config exists", () => {
+  it.each([
+    { plugins: { enabled: false } },
+    { plugins: { entries: { "decision-plugin": { enabled: false } } } },
+    { plugins: { deny: ["decision-plugin"] } },
+  ])("keeps a selected decision provider disabled by explicit plugin policy: %j", ({ plugins }) => {
     const result = applyPluginAutoEnable({
-      config: {
-        plugins: {
-          entries: {
-            xai: {
-              config: {
-                webSearch: {
-                  apiKey: "xai-plugin-config-key",
-                },
-              },
-            },
-          },
-        },
-      },
+      config: { agents: { defaults: { decisionModel: "judge/fast" } }, plugins },
       env,
       manifestRegistry: makeRegistry([
         {
-          id: "xai",
+          id: "decision-plugin",
           channels: [],
-          providers: ["xai"],
-          contracts: {
-            webSearchProviders: ["grok"],
-          },
+          origin: "bundled",
+          contracts: { decisionProviders: ["judge"] },
         },
       ]),
     });
-
-    expect(result.config.plugins?.entries?.xai?.enabled).toBe(true);
-    expect(result.changes).toContain("xai web search configured, enabled automatically.");
-  });
-
-  it("auto-enables selected web search provider plugins under restrictive allowlists", () => {
-    const result = applyPluginAutoEnable({
-      config: {
-        tools: {
-          web: {
-            search: {
-              provider: "brave",
-            },
-          },
-        },
-        plugins: {
-          allow: ["telegram"],
-        },
-      },
-      env,
-      manifestRegistry: makeRegistry([
-        {
-          id: "brave",
-          channels: [],
-          contracts: {
-            webSearchProviders: ["brave"],
-          },
-        },
-      ]),
-    });
-
-    expect(result.config.plugins?.entries?.brave?.enabled).toBe(true);
-    expect(result.config.plugins?.allow).toEqual(["telegram", "brave"]);
-    expect(result.changes).toContain("brave web search provider selected, enabled automatically.");
-  });
-
-  it("does not auto-enable selected web search provider plugins when web search is disabled", () => {
-    const result = applyPluginAutoEnable({
-      config: {
-        tools: {
-          web: {
-            search: {
-              enabled: false,
-              provider: "brave",
-            },
-          },
-        },
-        plugins: {
-          allow: ["telegram"],
-        },
-        agents: {
-          defaults: {
-            model: "codex/gpt-5.4",
-          },
-        },
-      },
-      env,
-      manifestRegistry: makeRegistry([
-        {
-          id: "brave",
-          channels: [],
-          contracts: {
-            webSearchProviders: ["brave"],
-          },
-        },
-        {
-          id: "codex",
-          channels: [],
-          providers: ["codex"],
-        },
-      ]),
-    });
-
-    expect(result.config.plugins?.entries?.codex?.enabled).toBe(true);
-    expect(result.config.plugins?.entries?.brave).toBeUndefined();
-    expect(result.config.plugins?.allow).toEqual(["telegram", "codex"]);
-    expect(result.changes).toContain("codex/gpt-5.4 model configured, enabled automatically.");
-    expect(result.changes).not.toContain(
-      "brave web search provider selected, enabled automatically.",
-    );
+    expect(result.config.plugins?.entries?.["decision-plugin"]?.enabled).not.toBe(true);
+    expect(result.changes).toEqual([]);
   });
 
   it("materializes xai setup auto-enable when the plugin-owned x_search tool is configured", () => {
@@ -212,6 +123,195 @@ describe("applyPluginAutoEnable providers", () => {
     expect(result.changes).toContain("xai tool configured, enabled automatically.");
   });
 
+  const googleProviderCases: Array<{ name: string; config: OpenClawConfig }> = [
+    {
+      name: "Google auth profile",
+      config: {
+        auth: {
+          profiles: {
+            "google:default": {
+              provider: "google",
+              mode: "api_key",
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "Google provider config",
+      config: {
+        models: {
+          providers: {
+            google: {
+              apiKey: "configured-google-key",
+              baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+              models: [],
+            },
+          },
+        },
+      },
+    },
+    {
+      name: "Google Vertex auth profile",
+      config: {
+        auth: {
+          profiles: {
+            "google-vertex:default": {
+              provider: "google-vertex",
+              mode: "oauth",
+            },
+          },
+        },
+      },
+    },
+  ];
+
+  it.each(googleProviderCases)(
+    "auto-enables the Google plugin from $name under a restrictive allowlist",
+    ({ config }) => {
+      const result = applyPluginAutoEnable({
+        config: {
+          ...config,
+          plugins: { allow: ["telegram"] },
+        },
+        env,
+      });
+
+      expect(result.config.plugins?.entries?.google?.enabled).toBe(true);
+      expect(result.config.plugins?.allow).toEqual(["telegram", "google"]);
+    },
+  );
+
+  it("auto-enables selected web search provider plugins under restrictive allowlists", () => {
+    const result = applyPluginAutoEnable({
+      config: {
+        tools: {
+          web: {
+            search: {
+              provider: "brave",
+            },
+          },
+        },
+        plugins: {
+          allow: ["telegram"],
+        },
+      },
+      env,
+      manifestRegistry: makeRegistry([
+        {
+          id: "brave",
+          channels: [],
+          contracts: {
+            webSearchProviders: ["brave"],
+          },
+        },
+      ]),
+    });
+
+    expect(result.config.plugins?.entries?.brave?.enabled).toBe(true);
+    expect(result.config.plugins?.allow).toEqual(["telegram", "brave"]);
+    expect(result.changes).toContain("brave web search provider selected, enabled automatically.");
+  });
+
+  it("auto-enables a bundled worker provider selected by a cloud worker profile", () => {
+    const result = applyPluginAutoEnable({
+      config: {
+        cloudWorkers: {
+          profiles: {
+            development: {
+              provider: " STATIC-SSH ",
+              settings: { host: "worker.example.test" },
+            },
+          },
+        },
+        plugins: { allow: ["telegram"] },
+      },
+      env,
+      manifestRegistry: makeRegistry([
+        {
+          id: "qa-lab",
+          channels: [],
+          contracts: { workerProviders: ["static-ssh"] },
+          origin: "bundled",
+        },
+      ]),
+    });
+
+    expect(result.config.plugins?.entries?.["qa-lab"]?.enabled).toBe(true);
+    expect(result.config.plugins?.allow).toEqual(["telegram", "qa-lab"]);
+    expect(result.autoEnabledReasons).toEqual({
+      "qa-lab": ["static-ssh worker provider selected"],
+    });
+  });
+
+  it("requires explicit enablement for external worker providers", () => {
+    const result = applyPluginAutoEnable({
+      config: {
+        cloudWorkers: {
+          profiles: { production: { provider: "cloud-vendor" } },
+        },
+      },
+      env,
+      manifestRegistry: makeRegistry([
+        {
+          id: "cloud-vendor-plugin",
+          channels: [],
+          contracts: { workerProviders: ["cloud-vendor"] },
+          origin: "global",
+        },
+      ]),
+    });
+
+    expect(result.config.plugins?.entries?.["cloud-vendor-plugin"]).toBeUndefined();
+    expect(result.changes).toEqual([]);
+  });
+
+  it("does not auto-enable selected web search provider plugins when web search is disabled", () => {
+    const result = applyPluginAutoEnable({
+      config: {
+        tools: {
+          web: {
+            search: {
+              enabled: false,
+              provider: "brave",
+            },
+          },
+        },
+        plugins: {
+          allow: ["telegram"],
+        },
+        agents: {
+          defaults: {
+            model: "codex/gpt-5.4",
+          },
+        },
+      },
+      env,
+      manifestRegistry: makeRegistry([
+        {
+          id: "brave",
+          channels: [],
+          contracts: {
+            webSearchProviders: ["brave"],
+          },
+        },
+        {
+          id: "codex",
+          channels: [],
+          providers: ["codex"],
+        },
+      ]),
+    });
+
+    expect(result.config.plugins?.entries?.codex?.enabled).toBe(true);
+    expect(result.config.plugins?.entries?.brave).toBeUndefined();
+    expect(result.config.plugins?.allow).toEqual(["telegram", "codex"]);
+    expect(result.changes).toContain("codex/gpt-5.4 model configured, enabled automatically.");
+    expect(result.changes).not.toContain(
+      "brave web search provider selected, enabled automatically.",
+    );
+  });
+
   it("auto-enables minimax when minimax-portal profiles exist", () => {
     const result = applyPluginAutoEnable({
       config: {
@@ -236,31 +336,6 @@ describe("applyPluginAutoEnable providers", () => {
 
     expect(result.config.plugins?.entries?.minimax?.enabled).toBe(true);
     expect(result.config.plugins?.entries?.["minimax-portal-auth"]).toBeUndefined();
-  });
-
-  it("auto-enables minimax when minimax API key auth is configured", () => {
-    const result = applyPluginAutoEnable({
-      config: {
-        auth: {
-          profiles: {
-            "minimax:default": {
-              provider: "minimax",
-              mode: "api_key",
-            },
-          },
-        },
-      },
-      env,
-      manifestRegistry: makeRegistry([
-        {
-          id: "minimax",
-          channels: [],
-          autoEnableWhenConfiguredProviders: ["minimax"],
-        },
-      ]),
-    });
-
-    expect(result.config.plugins?.entries?.minimax?.enabled).toBe(true);
   });
 
   it("does not auto-enable unrelated provider plugins just because auth profiles exist", () => {

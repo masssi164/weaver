@@ -3,46 +3,21 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 let buildDiscordComponentCustomId: typeof import("../components.js").buildDiscordComponentCustomId;
 let buildDiscordModalCustomId: typeof import("../components.js").buildDiscordModalCustomId;
-let createDiscordComponentButton: typeof import("./agent-components.js").createDiscordComponentButton;
-let createDiscordComponentChannelSelect: typeof import("./agent-components.js").createDiscordComponentChannelSelect;
-let createDiscordComponentMentionableSelect: typeof import("./agent-components.js").createDiscordComponentMentionableSelect;
+let createDiscordComponentControls: typeof import("./agent-components.js").createDiscordComponentControls;
 let createDiscordComponentModal: typeof import("./agent-components.js").createDiscordComponentModal;
-let createDiscordComponentRoleSelect: typeof import("./agent-components.js").createDiscordComponentRoleSelect;
-let createDiscordComponentStringSelect: typeof import("./agent-components.js").createDiscordComponentStringSelect;
-let createDiscordComponentUserSelect: typeof import("./agent-components.js").createDiscordComponentUserSelect;
 
 beforeAll(async () => {
   ({ buildDiscordComponentCustomId, buildDiscordModalCustomId } = await import("../components.js"));
-  ({
-    createDiscordComponentButton,
-    createDiscordComponentChannelSelect,
-    createDiscordComponentMentionableSelect,
-    createDiscordComponentModal,
-    createDiscordComponentRoleSelect,
-    createDiscordComponentStringSelect,
-    createDiscordComponentUserSelect,
-  } = await import("./agent-components.js"));
+  ({ createDiscordComponentControls, createDiscordComponentModal } =
+    await import("./agent-components.js"));
 });
 
-type WildcardComponent = {
-  customId: string;
-  customIdParser: (id: string) => { key: string; data: unknown };
-};
-
-function asWildcardComponent(value: unknown): WildcardComponent {
-  return value as WildcardComponent;
-}
-
 function createWildcardComponents() {
-  const context = {} as Parameters<typeof createDiscordComponentButton>[0];
+  const context = { cfg: {}, accountId: "default" };
+  expect(createDiscordComponentControls).toHaveLength(6);
   return [
-    asWildcardComponent(createDiscordComponentButton(context)),
-    asWildcardComponent(createDiscordComponentStringSelect(context)),
-    asWildcardComponent(createDiscordComponentUserSelect(context)),
-    asWildcardComponent(createDiscordComponentRoleSelect(context)),
-    asWildcardComponent(createDiscordComponentMentionableSelect(context)),
-    asWildcardComponent(createDiscordComponentChannelSelect(context)),
-    asWildcardComponent(createDiscordComponentModal(context)),
+    ...createDiscordComponentControls.map((createControl) => createControl(context)),
+    createDiscordComponentModal(context),
   ];
 }
 

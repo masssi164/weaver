@@ -1,6 +1,5 @@
-// Discord plugin module implements rest scheduler behavior.
 import { resolveIntegerOption, resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
-import { RateLimitError, readRetryAfter } from "./rest-errors.js";
+import { RateLimitError, readDiscordRateLimitBucket, readRetryAfter } from "./rest-errors.js";
 import {
   createBucketKey,
   createRouteKey,
@@ -45,7 +44,7 @@ type RestSchedulerLaneOptions = {
   weight: number;
 };
 
-export type RestSchedulerOptions = {
+type RestSchedulerOptions = {
   lanes: Record<RequestPriority, RestSchedulerLaneOptions>;
   maxConcurrency: number;
   maxQueueSize: number;
@@ -214,16 +213,8 @@ export class RestScheduler<TData> {
         requestPriorities.map((lane) => [lane, this.getOldestQueuedAge(lane)]),
       ),
       activeWorkers: this.activeWorkers,
-      maxConcurrentWorkers: this.maxConcurrentWorkers,
+      maxConcurrentWorkers: this.options.maxConcurrency,
     };
-  }
-
-  private get maxConcurrentWorkers(): number {
-    return this.options.maxConcurrency;
-  }
-
-  private get maxRateLimitRetries(): number {
-    return this.options.maxRateLimitRetries;
   }
 
   private getBucket(key: string): BucketState<TData> {
@@ -308,7 +299,7 @@ export class RestScheduler<TData> {
     response: Response,
     parsed: unknown,
   ): void {
-    const bucketHeader = response.headers.get("X-RateLimit-Bucket");
+    const bucketHeader = readDiscordRateLimitBucket(response);
     const bucket = bucketHeader
       ? this.bindRouteToBucket(routeKey, createBucketKey(bucketHeader, path))
       : this.getBucket(this.routeBuckets.get(routeKey) ?? routeKey);
@@ -352,7 +343,7 @@ export class RestScheduler<TData> {
     const now = Date.now();
     this.invalidRequestTimestamps.push({ at: now, status: response.status });
     this.pruneInvalidRequests(now);
-    const bucketHeader = response.headers.get("X-RateLimit-Bucket");
+    const bucketHeader = readDiscordRateLimitBucket(response);
     const bucketKey = bucketHeader
       ? createBucketKey(bucketHeader, path)
       : (this.routeBuckets.get(routeKey) ?? routeKey);
@@ -398,7 +389,7 @@ export class RestScheduler<TData> {
 
   private drainQueues(): void {
     let nextDelayMs = Number.POSITIVE_INFINITY;
-    while (this.activeWorkers < this.maxConcurrentWorkers) {
+    while (this.activeWorkers < this.options.maxConcurrency) {
       const next = this.takeNextQueuedRequest();
       if (!next.queued) {
         if (next.waitMs !== undefined) {
@@ -535,7 +526,7 @@ export class RestScheduler<TData> {
   private requeueRateLimitedRequest(queued: ScheduledRequest<TData>): boolean {
     if (
       queued.generation !== this.queueGeneration ||
-      queued.retryCount >= this.maxRateLimitRetries
+      queued.retryCount >= this.options.maxRateLimitRetries
     ) {
       return false;
     }

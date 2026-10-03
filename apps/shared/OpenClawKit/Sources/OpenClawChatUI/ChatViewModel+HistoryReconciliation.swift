@@ -2,12 +2,20 @@ import Foundation
 import OpenClawKit
 
 extension OpenClawChatViewModel {
-    static func decodeMessages(_ raw: [AnyCodable]) -> [OpenClawChatMessage] {
+    static func decodeMessages(
+        _ raw: [AnyCodable],
+        activity: [OpenClawChatHistoryActivity]? = nil) -> [OpenClawChatMessage]
+    {
+        let byID = Dictionary((activity ?? []).map { ($0.messageId, $0.items) }, uniquingKeysWith: { _, next in next })
         let decoded = raw.compactMap { item in
             (try? ChatPayloadDecoding.decode(item, as: OpenClawChatMessage.self))
                 .map { Self.stripInboundMetadata(from: $0) }
         }
-        return Self.dedupeMessages(decoded)
+        return Self.dedupeMessages(decoded.map { message in
+            var message = message
+            if let id = message.transcriptMessageID { message.activity = byID[id] }
+            return message
+        })
     }
 
     static func stripInboundMetadata(from message: OpenClawChatMessage) -> OpenClawChatMessage {
@@ -15,34 +23,14 @@ extension OpenClawChatViewModel {
             return message
         }
 
-        let sanitizedContent = message.content.map { content -> OpenClawChatMessageContent in
+        var sanitized = message
+        sanitized.content = message.content.map { content in
             guard let text = content.text else { return content }
-            let cleaned = ChatMarkdownPreprocessor.preprocess(markdown: text).cleaned
-            return OpenClawChatMessageContent(
-                type: content.type,
-                text: cleaned,
-                thinking: content.thinking,
-                thinkingSignature: content.thinkingSignature,
-                mimeType: content.mimeType,
-                fileName: content.fileName,
-                durationSeconds: content.durationSeconds,
-                content: content.content,
-                id: content.id,
-                name: content.name,
-                arguments: content.arguments)
+            var sanitized = content
+            sanitized.text = ChatMarkdownPreprocessor.preprocess(markdown: text).cleaned
+            return sanitized
         }
-
-        return OpenClawChatMessage(
-            id: message.id,
-            role: message.role,
-            content: sanitizedContent,
-            timestamp: message.timestamp,
-            idempotencyKey: message.idempotencyKey,
-            toolCallId: message.toolCallId,
-            toolName: message.toolName,
-            usage: message.usage,
-            stopReason: message.stopReason,
-            errorMessage: message.errorMessage)
+        return sanitized
     }
 
     static func messageContentFingerprint(for message: OpenClawChatMessage) -> String {
@@ -52,7 +40,12 @@ extension OpenClawChatViewModel {
             let id = (item.id ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let name = (item.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let fileName = (item.fileName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return [type, text, id, name, fileName].joined(separator: "\\u{001F}")
+            let artifactId = (item.artifactId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let url = (item.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let openUrl = (item.openUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let mimeType = (item.mimeType ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return [type, text, id, name, fileName, artifactId, url, openUrl, mimeType]
+                .joined(separator: "\\u{001F}")
         }.joined(separator: "\\u{001E}")
     }
 
@@ -60,7 +53,10 @@ extension OpenClawChatViewModel {
         message.content.map { item in
             let type = (item.type ?? "text").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let text = (item.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return [type, text].joined(separator: "\\u{001F}")
+            let artifactId = (item.artifactId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let url = (item.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let openUrl = (item.openUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return [type, text, artifactId, url, openUrl].joined(separator: "\\u{001F}")
         }.joined(separator: "\\u{001E}")
     }
 
@@ -70,9 +66,7 @@ extension OpenClawChatViewModel {
 
         // The gateway persists this key with the canonical user row. Prefer it
         // so a server timestamp change cannot replace the optimistic row's ID.
-        if let idempotencyKey = Self.normalizedIdempotencyKey(message.idempotencyKey) {
-            return [role, "idempotency", idempotencyKey].joined(separator: "|")
-        }
+        if let key = Self.correlatedMessageIdentityKey(for: message, role: role) { return key }
 
         let timestamp: String = {
             guard let value = message.timestamp, value.isFinite else { return "" }
@@ -101,9 +95,27 @@ extension OpenClawChatViewModel {
         return [role, toolCallId, toolName, contentFingerprint].joined(separator: "|")
     }
 
+    private static func isFinalAssistantMessage(_ message: OpenClawChatMessage) -> Bool {
+        // Like src/sessions/transcript-events.ts, exclude intermediate tool rows:
+        // they carry the same run ID but cannot settle the final reply.
+        self.isAssistantMessage(message) &&
+            message.streamSegmentID == nil &&
+            !["tooluse", "tool_use", "tool_calls"].contains(message.stopReason?.lowercased() ?? "") &&
+            !message.content.contains {
+                ["toolcall", "tool_call", "tooluse", "tool_use", "functioncall"]
+                    .contains($0.type?.lowercased() ?? "")
+            }
+    }
+
+    private static func finalMessageRunID(for message: OpenClawChatMessage) -> String? {
+        guard self.isFinalAssistantMessage(message) else { return nil }
+        // v2026.8.1 projected run correlation through idempotencyKey. Prefer the
+        // current recorded run ID so a foreign run never matches a legacy key.
+        return self.normalizedRunID(message.transcriptRunID) ?? self.normalizedIdempotencyKey(message.idempotencyKey)
+    }
+
     static func finalMessageReconciliationKey(for message: OpenClawChatMessage) -> String? {
-        let role = message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard role == "assistant" else { return nil }
+        guard self.isFinalAssistantMessage(message) else { return nil }
 
         // chat.final and session.message can serialize the same final row with
         // different timestamps/content ids. Reconciliation prefers the durable
@@ -114,7 +126,7 @@ extension OpenClawChatViewModel {
         if contentFingerprint.isEmpty, toolCallId.isEmpty, toolName.isEmpty {
             return nil
         }
-        return [role, toolCallId, toolName, contentFingerprint].joined(separator: "|")
+        return ["assistant", toolCallId, toolName, contentFingerprint].joined(separator: "|")
     }
 
     static func normalizedRunID(_ runId: String?) -> String? {
@@ -127,23 +139,37 @@ extension OpenClawChatViewModel {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private static func normalizedTranscriptMessageID(_ id: String?) -> String? {
+        let trimmed = id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func correlatedMessageIdentityKey(for message: OpenClawChatMessage, role: String) -> String? {
+        if let segmentID = message.streamSegmentID {
+            let runID = Self.normalizedRunID(message.transcriptRunID) ??
+                Self.normalizedRunID(message.streamFallback?.runId) ?? ""
+            return [role, "segment", runID, segmentID].joined(separator: "|")
+        }
+        if let idempotencyKey = Self.normalizedIdempotencyKey(message.idempotencyKey) {
+            return [role, "idempotency", idempotencyKey].joined(separator: "|")
+        }
+        guard let id = Self.normalizedTranscriptMessageID(message.transcriptMessageID) else { return nil }
+        return [role, "transcript", id].joined(separator: "|")
+    }
+
     static func adoptingCanonicalMessage(
         _ incoming: OpenClawChatMessage,
         over existing: OpenClawChatMessage) -> OpenClawChatMessage
     {
-        OpenClawChatMessage(
-            id: existing.id,
-            role: incoming.role,
-            content: self.preservingLocalAudioDurations(
-                in: incoming.content,
-                from: existing.content),
-            timestamp: incoming.timestamp ?? existing.timestamp,
-            idempotencyKey: incoming.idempotencyKey,
-            toolCallId: incoming.toolCallId,
-            toolName: incoming.toolName,
-            usage: incoming.usage,
-            stopReason: incoming.stopReason,
-            errorMessage: incoming.errorMessage)
+        var adopted = incoming
+        adopted.id = existing.id
+        adopted.content = self.preservingLocalAudioDurations(in: incoming.content, from: existing.content)
+        adopted.timestamp = incoming.timestamp ?? existing.timestamp
+        adopted.transcriptMessageID = incoming.transcriptMessageID ?? existing.transcriptMessageID
+        adopted.transcriptRunID = incoming.transcriptRunID ?? existing.transcriptRunID
+        adopted.provenance = incoming.provenance ?? existing.provenance
+        adopted.historyMarker = incoming.historyMarker ?? existing.historyMarker
+        return adopted
     }
 
     private static func preservingLocalAudioDurations(
@@ -163,18 +189,9 @@ extension OpenClawChatViewModel {
             else {
                 return content
             }
-            return OpenClawChatMessageContent(
-                type: content.type,
-                text: content.text,
-                thinking: content.thinking,
-                thinkingSignature: content.thinkingSignature,
-                mimeType: content.mimeType,
-                fileName: content.fileName,
-                durationSeconds: localDuration,
-                content: content.content,
-                id: content.id,
-                name: content.name,
-                arguments: content.arguments)
+            var adopted = content
+            adopted.durationSeconds = localDuration
+            return adopted
         }
     }
 
@@ -301,10 +318,10 @@ extension OpenClawChatViewModel {
     {
         guard let key = Self.finalMessageReconciliationKey(for: message) else { return false }
         guard self.isCurrentSession(scope.session) else { return false }
-        if let runId = Self.normalizedIdempotencyKey(message.idempotencyKey) {
+        if let runId = Self.finalMessageRunID(for: message) {
             return self.messages.contains { existing in
                 self.provisionalFinalMessagesByID[existing.id] == nil &&
-                    Self.normalizedIdempotencyKey(existing.idempotencyKey) == runId
+                    Self.finalMessageRunID(for: existing) == runId
             }
         }
         let searchRange = Self.messageRange(after: scope.latestUserTurn, in: self.messages)
@@ -312,6 +329,7 @@ extension OpenClawChatViewModel {
 
         return self.messages[searchRange].contains { existing in
             self.provisionalFinalMessagesByID[existing.id] == nil &&
+                Self.normalizedRunID(existing.transcriptRunID) == nil &&
                 Self.finalMessageReconciliationKey(for: existing) == key
         }
     }
@@ -331,8 +349,7 @@ extension OpenClawChatViewModel {
             let exactRunIndex = provisional.runId.flatMap { runId in
                 reconciled.indices.last { index in
                     !claimedIncomingIndices.contains(index) &&
-                        Self.isAssistantMessage(reconciled[index]) &&
-                        Self.normalizedIdempotencyKey(reconciled[index].idempotencyKey) == runId
+                        Self.finalMessageRunID(for: reconciled[index]) == runId
                 }
             }
             let matchingIndex = exactRunIndex ?? {
@@ -342,6 +359,7 @@ extension OpenClawChatViewModel {
                 let range = Self.messageRange(after: provisional.scope.latestUserTurn, in: reconciled)
                 return range.last { index in
                     !claimedIncomingIndices.contains(index) &&
+                        Self.normalizedRunID(reconciled[index].transcriptRunID) == nil &&
                         Self.finalMessageReconciliationKey(for: reconciled[index]) == provisional.reconciliationKey
                 }
             }()
@@ -431,20 +449,10 @@ extension OpenClawChatViewModel {
                 Self.normalizedIdempotencyKey(message.idempotencyKey) == remoteKey
         }
         var updated = self.messages
-        updated[matchIndex] = if let canonical {
-            Self.adoptingCanonicalMessage(canonical, over: existing)
+        if let canonical {
+            updated[matchIndex] = Self.adoptingCanonicalMessage(canonical, over: existing)
         } else {
-            OpenClawChatMessage(
-                id: existing.id,
-                role: existing.role,
-                content: existing.content,
-                timestamp: existing.timestamp,
-                idempotencyKey: remoteKey,
-                toolCallId: existing.toolCallId,
-                toolName: existing.toolName,
-                usage: existing.usage,
-                stopReason: existing.stopReason,
-                errorMessage: existing.errorMessage)
+            updated[matchIndex].idempotencyKey = remoteKey
         }
         self.replaceMessages(Self.dedupeMessages(updated))
         guard let survivingIndex = self.messages.firstIndex(where: { message in
@@ -475,13 +483,12 @@ extension OpenClawChatViewModel {
             return true
         }
         return self.messages.contains { message in
-            Self.isAssistantMessage(message) &&
-                Self.normalizedIdempotencyKey(message.idempotencyKey) == runId
+            Self.finalMessageRunID(for: message) == runId
         }
     }
 
     func adoptProvisionalFinalMessage(incoming: OpenClawChatMessage) -> Bool {
-        let incomingRunId = Self.normalizedIdempotencyKey(incoming.idempotencyKey)
+        let incomingRunId = Self.finalMessageRunID(for: incoming)
         let incomingKey = Self.finalMessageReconciliationKey(for: incoming)
         guard incomingRunId != nil || incomingKey != nil else { return false }
         let canonicalUserTurn = self.currentRunMessageScope().latestUserTurn
@@ -491,7 +498,8 @@ extension OpenClawChatViewModel {
             if let incomingRunId, provisional.runId == incomingRunId {
                 return true
             }
-            return provisional.reconciliationKey == incomingKey &&
+            return Self.normalizedRunID(incoming.transcriptRunID) == nil &&
+                provisional.reconciliationKey == incomingKey &&
                 Self.isSameUserTurnBoundary(provisional.scope.latestUserTurn, canonicalUserTurn)
         }) else {
             return false
@@ -632,7 +640,12 @@ extension OpenClawChatViewModel {
                 continue
             }
 
-            let insertIndex = reconciled.firstIndex { existing in
+            // Reconciled IDs retain known transcript predecessors. Clock skew must
+            // not move an echo before those anchors and out of the next refresh's tail.
+            let precedingMessageIDs = Set(previous.prefix { $0.id != message.id }.map(\.id))
+            let insertionStart = reconciled.lastIndex(where: { precedingMessageIDs.contains($0.id) })
+                .map { reconciled.index(after: $0) } ?? reconciled.startIndex
+            let insertIndex = reconciled[insertionStart...].firstIndex { existing in
                 guard let existingTimestamp = existing.timestamp else { return false }
                 return existingTimestamp > messageTimestamp
             } ?? reconciled.endIndex
@@ -661,13 +674,177 @@ extension OpenClawChatViewModel {
     }
 
     static func dedupeKey(for message: OpenClawChatMessage) -> String? {
-        if let idempotencyKey = normalizedIdempotencyKey(message.idempotencyKey) {
-            return "\(message.role)|idempotency|\(idempotencyKey)"
-        }
+        if let key = correlatedMessageIdentityKey(for: message, role: message.role) { return key }
         guard let timestamp = message.timestamp else { return nil }
         let text = message.content.compactMap(\.text).joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         return "\(message.role)|\(timestamp)|\(text)"
+    }
+}
+
+extension OpenClawChatViewModel {
+    func canApplyHistory(_ request: HistoryRequest) -> Bool {
+        request.id >= self.latestAppliedHistoryRequestID &&
+            self.isCurrentSession(request.session)
+    }
+
+    func advanceSessionGeneration() {
+        self.cancelHistoryInvalidationRefresh()
+        self.sessionGeneration &+= 1
+    }
+
+    func invalidateRunSnapshots() {
+        self.runOwnershipGeneration &+= 1
+    }
+
+    func invalidateHistorySnapshots() {
+        self.historyMutationGeneration &+= 1
+    }
+
+    func cancelHistoryInvalidationRefresh() {
+        self.historyInvalidationRefresh?.task.cancel()
+        self.historyInvalidationRefresh = nil
+    }
+
+    func beginHistoryRequest(
+        for sessionSnapshot: SessionSnapshot? = nil,
+        captureLatestUserTurn: Bool = true) -> HistoryRequest
+    {
+        self.lastIssuedHistoryRequestID &+= 1
+        return HistoryRequest(
+            id: self.lastIssuedHistoryRequestID,
+            session: sessionSnapshot ?? self.currentSessionSnapshot(),
+            pendingRunIDs: self.pendingRuns,
+            visibleMessagesByID: Dictionary(uniqueKeysWithValues: self.messages.map { ($0.id, $0) }),
+            historyMutationGeneration: self.historyMutationGeneration,
+            progressCardGeneration: self.progressCardGeneration,
+            runOwnershipGeneration: self.runOwnershipGeneration,
+            latestUserTurn: captureLatestUserTurn ? Self.latestUserTurn(in: self.messages) : nil)
+    }
+
+    private func markHistoryRequestApplied(_ request: HistoryRequest) {
+        self.latestAppliedHistoryRequestID = max(self.latestAppliedHistoryRequestID, request.id)
+        if let refresh = self.historyInvalidationRefresh, request.id >= refresh.requestID {
+            self.cancelHistoryInvalidationRefresh()
+        }
+    }
+
+    @discardableResult
+    func applyHistoryPayload(
+        _ payload: OpenClawChatHistoryPayload,
+        for request: HistoryRequest,
+        preservingOptimisticLocalMessages: Bool,
+        syncThinkingOptions: Bool = false) -> Bool
+    {
+        guard self.canApplyHistory(request) else { return false }
+        let incoming = self.adoptingProvisionalFinalMessageIDs(
+            in: Self.decodeMessages(payload.messages ?? [], activity: payload.activity))
+        let unmatchedProvisionalFinalIDs = Set(provisionalFinalMessagesMissing(from: incoming).map(\.id))
+        var retainedMessageIDs = unmatchedProvisionalFinalIDs
+        if request.historyMutationGeneration != self.historyMutationGeneration {
+            for message in self.messages where request.visibleMessagesByID[message.id] != message {
+                let isMatchedProvisional = self.provisionalFinalMessagesByID[message.id] != nil &&
+                    !unmatchedProvisionalFinalIDs.contains(message.id)
+                if !isMatchedProvisional {
+                    retainedMessageIDs.insert(message.id)
+                }
+            }
+        }
+        // Durable outbox rows remain authoritative until canonical history
+        // confirms their idempotency key. Keep their bubbles through lagging
+        // snapshots; a cold open reconstructs them from client state.
+        retainedMessageIDs.formUnion(self.outboxCommandIDsByMessageID.keys)
+        var nextMessages = if preservingOptimisticLocalMessages {
+            Self.reconcileRunRefreshMessages(
+                previous: self.messages,
+                incoming: incoming,
+                pendingLocalUserEchoIDs: Set(self.pendingLocalUserEchoMessageIDsByRunID.values))
+        } else {
+            Self.reconcileMessageIDs(previous: self.messages, incoming: incoming)
+        }
+        let reconciledMessageIDs = Set(nextMessages.map(\.id))
+        nextMessages.append(contentsOf: self.messages.filter { message in
+            retainedMessageIDs.contains(message.id) && !reconciledMessageIDs.contains(message.id)
+        })
+        nextMessages = Self.dedupeMessages(nextMessages)
+        // Explicit idle includes terminal persistence. Only a current, complete
+        // snapshot may retire narration absent from canonical history.
+        let narrationSettled = payload.sessionInfo?.hasActiveRun == false &&
+            payload.inFlightRun == nil &&
+            request.runOwnershipGeneration == self.runOwnershipGeneration &&
+            request.id >= self.latestAppliedRunSnapshotRequestID &&
+            unmatchedProvisionalFinalIDs.isEmpty &&
+            (!preservingOptimisticLocalMessages || !incoming.isEmpty)
+        replaceMessages(nextMessages, narrationSettled: narrationSettled)
+        confirmOutboxCommands(in: incoming)
+        self.prunePendingLocalUserEchoMessageIDs()
+        self.clearProvisionalFinalMarkersAdoptedByHistory(incoming)
+        self.pruneProvisionalFinalMessages()
+        self.pruneRunMessageScopes()
+        self.rescopeRunsAdoptedAfterHistoryRequest(request)
+        self.sessionId = payload.sessionId
+        self.applyInFlightRunSnapshot(payload, for: request)
+        // Incomplete refreshes can arrive before durable assistant history.
+        // The latest visible user turn must survive answered before it can reject older replies.
+        let canInvalidateOlderHistory = if let latestUserTurn = request.latestUserTurn {
+            Self.hasAnsweredUser(latestUserTurn, in: self.messages)
+        } else {
+            !Self.hasUnansweredLatestUser(in: self.messages)
+        }
+        if canInvalidateOlderHistory {
+            self.markHistoryRequestApplied(request)
+        }
+        self.clearActiveSessionRunIndicatorIfLatestUserAnswered()
+        let appliedThinkingLevel = !self.prefersExplicitThinkingLevel
+            ? Self.normalizedThinkingLevel(payload.thinkingLevel)
+            : nil
+        if let level = appliedThinkingLevel {
+            self.preferredThinkingLevel = level
+            self.thinkingLevel = level
+        }
+        if syncThinkingOptions || appliedThinkingLevel != nil {
+            syncThinkingLevelOptions()
+        }
+        // Live history is the source of truth: it clears the cached marker and
+        // is written through so the next cold open pre-paints current rows.
+        self.hasAppliedLiveHistory = true
+        self.isShowingCachedTranscript = false
+        // An empty post-send refresh is incomplete by contract: reconciliation
+        // preserves the visible transcript, so preserve its last canonical cache too.
+        if !preservingOptimisticLocalMessages || !incoming.isEmpty {
+            // The cache store writes only gateway-derived rows. It filters
+            // locally retained outbox bubbles until history proves their keys.
+            persistTranscriptToCache(
+                session: request.session,
+                messages: nextMessages,
+                canonicalMessageIdempotencyKeys: Set(incoming.compactMap(\.idempotencyKey)))
+        }
+        // Wholesale history replacement drops local-only queued bubbles;
+        // re-adopt or re-append them from the durable outbox.
+        restoreOutboxMessages(session: request.session)
+        self.refreshProgressCard(from: payload.sessionInfo, for: request)
+        self.applyDeferredExternalStateIfReady()
+        return true
+    }
+
+    private func provisionalFinalMessagesMissing(
+        from incoming: [OpenClawChatMessage]) -> [OpenClawChatMessage]
+    {
+        // Adoption above assigns each canonical row at most one provisional ID.
+        // Re-matching by content here could consume a second, distinct reply.
+        let incomingMessageIDs = Set(incoming.map(\.id))
+        return self.messages.filter { message in
+            self.provisionalFinalMessagesByID[message.id] != nil && !incomingMessageIDs.contains(message.id)
+        }
+    }
+
+    private func rescopeRunsAdoptedAfterHistoryRequest(_ request: HistoryRequest) {
+        for runId in self.pendingRuns {
+            let scope = self.runMessageScopesByRunID[runId]
+            if !request.pendingRunIDs.contains(runId) || scope?.latestUserTurn == nil {
+                self.runMessageScopesByRunID[runId] = self.currentRunMessageScope()
+            }
+        }
     }
 }

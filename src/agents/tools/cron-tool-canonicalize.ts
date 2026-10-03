@@ -1,22 +1,20 @@
-/**
- * Cron tool argument canonicalization.
- *
- * Recovers flat or partial model/tool inputs into the structured cron job/patch shape.
- */
 import { timestampMsToIsoString } from "@openclaw/normalization-core/number-coercion";
+import { hasNonEmptyString as isNonEmptyString } from "@openclaw/normalization-core/string-coerce";
 import { isRecord } from "../../utils.js";
 import { isStringOption } from "../../utils/string-readers.js";
 
-const CRON_SCHEDULE_KINDS = ["at", "every", "cron", "on-exit"] as const;
-const CRON_PAYLOAD_KINDS = ["systemEvent", "agentTurn"] as const;
+const CRON_SCHEDULE_KINDS = ["at", "every", "cron", "on-exit", "stream"] as const;
+const CRON_PAYLOAD_KINDS = ["systemEvent", "agentTurn", "script", "command"] as const;
 const CRON_FLAT_PAYLOAD_KEYS = [
   "message",
   "text",
+  "script",
   "model",
   "fallbacks",
   "toolsAllow",
   "thinking",
   "timeoutSeconds",
+  "toolBudget",
   "lightContext",
   "allowUnsafeExternalContent",
 ] as const;
@@ -35,6 +33,10 @@ const CRON_FLAT_SCHEDULE_KEYS = [
   "exact",
   "command",
   "cwd",
+  "mode",
+  "match",
+  "batchMs",
+  "maxBatchBytes",
 ] as const;
 const CRON_RECOVERABLE_OBJECT_KEYS: ReadonlySet<string> = new Set([
   "name",
@@ -42,6 +44,8 @@ const CRON_RECOVERABLE_OBJECT_KEYS: ReadonlySet<string> = new Set([
   "displayName",
   "owner",
   "schedule",
+  "pacing",
+  "trigger",
   "sessionTarget",
   "wakeMode",
   "payload",
@@ -64,11 +68,7 @@ function isCronScheduleKind(value: unknown): value is (typeof CRON_SCHEDULE_KIND
 }
 
 function isCronPayloadKind(value: unknown): value is (typeof CRON_PAYLOAD_KINDS)[number] {
-  return value === "systemEvent" || value === "agentTurn";
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
+  return isStringOption(value, CRON_PAYLOAD_KINDS);
 }
 
 function isStringArrayOrNull(value: unknown): boolean {
@@ -120,30 +120,26 @@ function setScheduleAtMs(schedule: Record<string, unknown>, value: unknown): voi
   const atMs = typeof value === "number" ? value : Number(value);
   // Invalid/out-of-range timestamps stay raw so cron gateway validation reports the user error.
   schedule.at = Number.isFinite(atMs) ? (timestampMsToIsoString(Math.floor(atMs)) ?? value) : value;
+  if (!isCronScheduleKind(schedule.kind)) {
+    schedule.kind = "at";
+  }
 }
 
 function canonicalizeCronToolSchedule(value: Record<string, unknown>): void {
   const schedule = isRecord(value.schedule) ? { ...value.schedule } : {};
-  let hasSchedule = isRecord(value.schedule);
 
   if (schedule.atMs !== undefined) {
     setScheduleAtMs(schedule, schedule.atMs);
     delete schedule.atMs;
-    if (!isCronScheduleKind(schedule.kind)) {
-      schedule.kind = "at";
+  }
+  for (const [from, to] of [
+    ["every", "everyMs"],
+    ["cron", "expr"],
+    ["stagger", "staggerMs"],
+  ] as const) {
+    if (schedule[to] === undefined) {
+      moveDefinedField({ source: schedule, target: schedule, from, to });
     }
-  }
-  if (schedule.everyMs === undefined && schedule.every !== undefined) {
-    schedule.everyMs = schedule.every;
-    delete schedule.every;
-  }
-  if (schedule.expr === undefined && schedule.cron !== undefined) {
-    schedule.expr = schedule.cron;
-    delete schedule.cron;
-  }
-  if (schedule.staggerMs === undefined && schedule.stagger !== undefined) {
-    schedule.staggerMs = schedule.stagger;
-    delete schedule.stagger;
   }
   if (schedule.exact === true && schedule.staggerMs === undefined) {
     schedule.staggerMs = 0;
@@ -153,7 +149,6 @@ function canonicalizeCronToolSchedule(value: Record<string, unknown>): void {
   if (isCronScheduleKind(value.kind) && !isCronScheduleKind(schedule.kind)) {
     schedule.kind = value.kind;
     delete value.kind;
-    hasSchedule = true;
   }
 
   const movedAt = moveDefinedField({ source: value, target: schedule, from: "at" });
@@ -164,10 +159,6 @@ function canonicalizeCronToolSchedule(value: Record<string, unknown>): void {
   if (value.atMs !== undefined) {
     setScheduleAtMs(schedule, value.atMs);
     delete value.atMs;
-    if (!isCronScheduleKind(schedule.kind)) {
-      schedule.kind = "at";
-    }
-    hasSchedule = true;
   }
 
   const movedEveryMs =
@@ -189,16 +180,22 @@ function canonicalizeCronToolSchedule(value: Record<string, unknown>): void {
     schedule.kind = "on-exit";
   }
 
-  for (const key of ["anchorMs", "tz", "staggerMs", "cwd"] as const) {
-    hasSchedule = moveDefinedField({ source: value, target: schedule, from: key }) || hasSchedule;
+  for (const key of [
+    "anchorMs",
+    "tz",
+    "staggerMs",
+    "cwd",
+    "mode",
+    "match",
+    "batchMs",
+    "maxBatchBytes",
+  ] as const) {
+    moveDefinedField({ source: value, target: schedule, from: key });
   }
-  hasSchedule =
-    moveDefinedField({ source: value, target: schedule, from: "stagger", to: "staggerMs" }) ||
-    hasSchedule;
+  moveDefinedField({ source: value, target: schedule, from: "stagger", to: "staggerMs" });
 
   if (value.exact === true && schedule.staggerMs === undefined) {
     schedule.staggerMs = 0;
-    hasSchedule = true;
   }
   delete value.exact;
 
@@ -214,71 +211,57 @@ function canonicalizeCronToolSchedule(value: Record<string, unknown>): void {
     }
   }
 
-  if (hasSchedule || Object.keys(schedule).length > 0) {
+  if (isRecord(value.schedule) || Object.keys(schedule).length > 0) {
     value.schedule = schedule;
   }
 }
 
 function canonicalizeCronToolPayload(value: Record<string, unknown>): void {
   const payload = isRecord(value.payload) ? { ...value.payload } : {};
-  let hasPayload = isRecord(value.payload);
 
   for (const key of CRON_FLAT_PAYLOAD_KEYS) {
-    hasPayload = moveDefinedField({ source: value, target: payload, from: key }) || hasPayload;
+    moveDefinedField({ source: value, target: payload, from: key });
   }
 
   if (isCronPayloadKind(value.kind) && !isCronPayloadKind(payload.kind)) {
     payload.kind = value.kind;
     delete value.kind;
-    hasPayload = true;
   }
 
   if (!isCronPayloadKind(payload.kind)) {
-    const hasAgentTurnSignal =
-      isNonEmptyString(payload.message) ||
-      isNonEmptyString(payload.model) ||
-      payload.model === null ||
-      isNonEmptyString(payload.thinking) ||
-      typeof payload.timeoutSeconds === "number" ||
-      typeof payload.lightContext === "boolean" ||
-      typeof payload.allowUnsafeExternalContent === "boolean" ||
-      (payload.fallbacks !== undefined && isStringArrayOrNull(payload.fallbacks)) ||
-      (payload.toolsAllow !== undefined && isStringArrayOrNull(payload.toolsAllow));
-    if (hasAgentTurnSignal) {
-      payload.kind = "agentTurn";
-    } else if (isNonEmptyString(payload.text)) {
-      payload.kind = "systemEvent";
+    if (isNonEmptyString(payload.script)) {
+      payload.kind = "script";
+    } else {
+      // Timeout alone inherits the stored kind; text+timeout is an agent prompt shorthand.
+      const hasAgentTurnSignal =
+        isNonEmptyString(payload.message) ||
+        isNonEmptyString(payload.model) ||
+        payload.model === null ||
+        isNonEmptyString(payload.thinking) ||
+        (typeof payload.timeoutSeconds === "number" && isNonEmptyString(payload.text)) ||
+        typeof payload.lightContext === "boolean" ||
+        typeof payload.allowUnsafeExternalContent === "boolean" ||
+        (payload.fallbacks !== undefined && isStringArrayOrNull(payload.fallbacks));
+      if (hasAgentTurnSignal) {
+        payload.kind = "agentTurn";
+      } else if (isNonEmptyString(payload.text)) {
+        payload.kind = "systemEvent";
+      }
     }
   }
 
-  if (hasPayload || Object.keys(payload).length > 0) {
+  if (isRecord(value.payload) || Object.keys(payload).length > 0) {
     value.payload = payload;
   }
 }
 
-/**
- * Normalizes whitespace-padded cron object keys. Some tool-call
- * extraction/serialization pipelines can produce keys with trailing spaces
- * (e.g. "schedule " instead of "schedule"), which causes strict gateway
- * validation to reject the job with "unexpected property" errors.
- *
- * Only recognized CRON_RECOVERABLE_OBJECT_KEYS are trimmed — arbitrary keys
- * (including special ones like "__proto__") are never mutated.
- *
- * If both the padded and canonical form of a key exist (e.g. "schedule " and
- * "schedule"), the padded key is preserved so strict gateway validation
- * rejects the ambiguous input rather than silently picking one value.
- */
+// Repair only recognized padded keys; keep canonical/padded conflicts for Gateway rejection.
 function repairPaddedCronKeys(value: Record<string, unknown>): void {
   for (const key of Object.keys(value)) {
     const trimmed = key.trim();
-    if (trimmed !== key && CRON_RECOVERABLE_OBJECT_KEYS.has(trimmed)) {
-      if (!(trimmed in value)) {
-        value[trimmed] = value[key];
-        delete value[key];
-      }
-      // When the canonical key already exists, preserve the padded duplicate
-      // so strict gateway validation sees the conflict and rejects the input.
+    if (trimmed !== key && CRON_RECOVERABLE_OBJECT_KEYS.has(trimmed) && !(trimmed in value)) {
+      value[trimmed] = value[key];
+      delete value[key];
     }
   }
 }
@@ -294,6 +277,31 @@ export function canonicalizeCronToolObject(
   canonicalizeCronToolSchedule(next);
   canonicalizeCronToolPayload(next);
   return next;
+}
+
+// cron.add accepts these nulls, and a null sessionKey intentionally suppresses
+// default creator-session binding on create.
+const CRON_CREATE_NULLABLE_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(["agentId", "sessionKey"]);
+
+function deleteNullFields(record: Record<string, unknown>, keep?: ReadonlySet<string>): void {
+  for (const [key, entry] of Object.entries(record)) {
+    if (entry === null && !keep?.has(key)) {
+      delete record[key];
+    } else if (isRecord(entry)) {
+      deleteNullFields(entry);
+    }
+  }
+}
+
+/**
+ * Drops null-valued fields from a create job in place. The model-facing job
+ * schema is shared with update, where null means "clear this field"; on create
+ * there is nothing to clear, and the strict gateway cron.add contract rejects
+ * the nulls its update patch accepts.
+ */
+export function stripCronCreateNullClears(value: Record<string, unknown>): Record<string, unknown> {
+  deleteNullFields(value, CRON_CREATE_NULLABLE_TOP_LEVEL_KEYS);
+  return value;
 }
 
 /** Detects recovered update patches that contain no meaningful cron fields after normalization. */

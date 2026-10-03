@@ -12,13 +12,15 @@ const providerRuntimeMocks = vi.hoisted(() => ({
   runProviderDynamicModel: vi.fn(),
 }));
 
-vi.mock("./agent-model-discovery.js", () => ({
-  normalizeDiscoveredAgentModel: (value: unknown) => value,
+const normalizeDiscoveredAgentModelMock = vi.hoisted(() => vi.fn((value: unknown) => value));
+
+vi.mock("./model-discovery-normalize.js", () => ({
+  normalizeDiscoveredAgentModel: normalizeDiscoveredAgentModelMock,
 }));
 
 vi.mock("../plugins/provider-runtime.js", () => providerRuntimeMocks);
 
-import { appendPrioritizedDynamicLiveModels } from "./live-model-dynamic-candidates.js";
+import { appendPrioritizedDynamicLiveModels } from "./test-helpers/live-model-dynamic-candidates.js";
 
 const REGISTRY = { find: () => undefined } as never;
 const DYNAMIC_PROVIDER = "dynamic-test-provider";
@@ -49,6 +51,7 @@ function model(provider: string, id: string): Model {
 
 describe("appendPrioritizedDynamicLiveModels", () => {
   beforeEach(() => {
+    normalizeDiscoveredAgentModelMock.mockClear();
     providerRuntimeMocks.prepareProviderDynamicModel.mockReset();
     providerRuntimeMocks.prepareProviderDynamicModel.mockResolvedValue(undefined);
     providerRuntimeMocks.resolveProviderModernModelRef.mockReset();
@@ -133,23 +136,25 @@ describe("appendPrioritizedDynamicLiveModels", () => {
     );
   });
 
-  it("does not duplicate refs already present in the generated registry", async () => {
-    const resolveDynamicModel: DynamicModelResolver = vi.fn(() => model(DYNAMIC_PROVIDER, "glm-5"));
-    const prepareDynamicModel: DynamicModelPreparer = vi.fn(async () => undefined);
+  it("materializes a directly prepared model without retrying synchronous resolution", async () => {
+    const preparedModel = model(DYNAMIC_PROVIDER, "glm-5");
+    providerRuntimeMocks.prepareProviderDynamicModel.mockResolvedValue(preparedModel);
 
     const result = await appendPrioritizedDynamicLiveModels({
-      models: [model(DYNAMIC_PROVIDER, "glm-5")],
+      models: [],
       agentDir: "/tmp/openclaw-agent",
       modelRegistry: REGISTRY,
-      resolveDynamicModel,
-      prepareDynamicModel,
       refs: [{ provider: DYNAMIC_PROVIDER, id: "glm-5" }],
     });
 
-    expect(result.added).toEqual([]);
-    expect(result.models).toHaveLength(1);
-    expect(prepareDynamicModel).not.toHaveBeenCalled();
-    expect(resolveDynamicModel).not.toHaveBeenCalled();
+    expect(result.added).toEqual([preparedModel]);
+    expect(providerRuntimeMocks.prepareProviderDynamicModel).toHaveBeenCalledOnce();
+    expect(providerRuntimeMocks.runProviderDynamicModel).not.toHaveBeenCalled();
+    expect(normalizeDiscoveredAgentModelMock).toHaveBeenCalledWith(
+      preparedModel,
+      "/tmp/openclaw-agent",
+      { config: undefined, workspaceDir: undefined },
+    );
   });
 
   it("uses default provider runtime hooks when resolvers are not injected", async () => {
@@ -159,9 +164,22 @@ describe("appendPrioritizedDynamicLiveModels", () => {
         : undefined,
     );
 
+    const config = {
+      models: {
+        providers: {
+          [DYNAMIC_PROVIDER]: {
+            api: "openai-completions",
+            baseUrl: "https://configured.example/v1",
+            models: [],
+          },
+        },
+      },
+    } as OpenClawConfig;
     const result = await appendPrioritizedDynamicLiveModels({
       models: [],
+      config,
       agentDir: "/tmp/openclaw-agent",
+      workspaceDir: "/tmp/openclaw-workspace",
       modelRegistry: REGISTRY,
       refs: [{ provider: DYNAMIC_PROVIDER, id: "glm-5" }],
     });
@@ -171,5 +189,10 @@ describe("appendPrioritizedDynamicLiveModels", () => {
     ]);
     expect(providerRuntimeMocks.prepareProviderDynamicModel).toHaveBeenCalledTimes(1);
     expect(providerRuntimeMocks.runProviderDynamicModel).toHaveBeenCalledTimes(1);
+    expect(normalizeDiscoveredAgentModelMock).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: DYNAMIC_PROVIDER, id: "glm-5" }),
+      "/tmp/openclaw-agent",
+      { config, workspaceDir: "/tmp/openclaw-workspace" },
+    );
   });
 });

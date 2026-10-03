@@ -14,6 +14,9 @@ import type {
 } from "../../../channels/plugins/types.adapters.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { isUnresolvedSecretInputError } from "../../../config/types.secrets.js";
+import { findUninspectedPluginDiagnostic } from "../../../plugins/discovery-availability.js";
+import { loadManifestMetadataSnapshot } from "../../../plugins/manifest-contract-eligibility.js";
+import { listDoctorConfiguredChannelIds } from "./configured-channel-ids.js";
 
 type ChannelDoctorEntry = {
   id: string;
@@ -65,34 +68,12 @@ export type ChannelDoctorEmptyAllowlistPolicyHooks = {
 };
 
 function collectConfiguredChannelIds(cfg: OpenClawConfig): string[] {
-  if (cfg.plugins?.enabled === false) {
-    return [];
-  }
-  const channels =
-    cfg.channels && typeof cfg.channels === "object" && !Array.isArray(cfg.channels)
-      ? cfg.channels
-      : null;
-  if (!channels) {
-    return [];
-  }
-  const channelEntries = channels as Record<string, unknown>;
-  return Object.keys(channels)
-    .filter((channelId) => {
-      if (channelId === "defaults") {
-        return false;
-      }
-      if (isChannelDoctorBlockedByConfig(channelId, cfg)) {
-        return false;
-      }
-      const entry = channelEntries[channelId];
-      return (
-        !entry ||
-        typeof entry !== "object" ||
-        Array.isArray(entry) ||
-        (entry as { enabled?: unknown }).enabled !== false
-      );
-    })
-    .toSorted();
+  return listDoctorConfiguredChannelIds(cfg, {
+    configEntryPolicy: "enabled",
+    skipWhenPluginsDisabled: true,
+    excludeExplicitlyDisabled: true,
+    sort: "codepoint",
+  }).filter((channelId) => !isChannelDoctorBlockedByConfig(channelId, cfg));
 }
 
 function isChannelDoctorBlockedByConfig(channelId: string, cfg: OpenClawConfig): boolean {
@@ -110,25 +91,9 @@ function isChannelDoctorBlockedByConfig(channelId: string, cfg: OpenClawConfig):
   );
 }
 
-function safeGetLoadedChannelPlugin(id: string) {
+function safelyResolveChannelPlugin<T>(id: string, resolve: (id: string) => T): T | undefined {
   try {
-    return getLoadedChannelPlugin(id);
-  } catch {
-    return undefined;
-  }
-}
-
-function safeGetBundledChannelSetupPlugin(id: string) {
-  try {
-    return getBundledChannelSetupPlugin(id);
-  } catch {
-    return undefined;
-  }
-}
-
-function safeGetBundledChannelPlugin(id: string) {
-  try {
-    return getBundledChannelPlugin(id);
+    return resolve(id);
   } catch {
     return undefined;
   }
@@ -222,9 +187,9 @@ function listChannelDoctorEntries(
   for (const id of selectedIds) {
     const doctor = mergeDoctorAdapters([
       readOnlyPluginsById.get(id)?.doctor,
-      safeGetLoadedChannelPlugin(id)?.doctor,
-      safeGetBundledChannelSetupPlugin(id)?.doctor,
-      safeGetBundledChannelPlugin(id)?.doctor,
+      safelyResolveChannelPlugin(id, getLoadedChannelPlugin)?.doctor,
+      safelyResolveChannelPlugin(id, getBundledChannelSetupPlugin)?.doctor,
+      safelyResolveChannelPlugin(id, getBundledChannelPlugin)?.doctor,
     ]);
     if (!doctor) {
       continue;
@@ -266,6 +231,33 @@ function shouldSkipDefaultEmptyGroupAllowlistWarningForEntries(
   );
 }
 
+function appendChannelDoctorMutation(
+  mutations: ChannelDoctorConfigMutation[],
+  currentCfg: OpenClawConfig,
+  mutation: ChannelDoctorConfigMutation | undefined,
+): OpenClawConfig {
+  if (mutation?.changes.length) {
+    mutations.push(mutation);
+    return mutation.config;
+  }
+  if (mutation?.warnings?.length) {
+    mutations.push({ config: currentCfg, changes: [], warnings: mutation.warnings });
+  }
+  return currentCfg;
+}
+
+function preserveUnavailableChannelConfig(
+  context: ChannelDoctorLookupContext,
+): ChannelDoctorConfigMutation | undefined {
+  if (!context.cfg.plugins?.load?.paths?.length) {
+    return undefined;
+  }
+  const warning = findUninspectedPluginDiagnostic(
+    loadManifestMetadataSnapshot({ config: context.cfg, env: context.env }).diagnostics,
+  );
+  return warning ? { config: context.cfg, changes: [], warnings: [warning.message] } : undefined;
+}
+
 /** Build cached empty-allowlist hooks backed by channel doctor adapters. */
 export function createChannelDoctorEmptyAllowlistPolicyHooks(
   context: ChannelDoctorLookupContext,
@@ -298,7 +290,12 @@ export async function runChannelDoctorConfigSequences(params: {
   env: NodeJS.ProcessEnv;
   shouldRepair: boolean;
 }): Promise<ChannelDoctorSequenceResult> {
+  const preserved = preserveUnavailableChannelConfig(params);
+  if (preserved) {
+    return { changeNotes: [], warningNotes: preserved.warnings ?? [] };
+  }
   const changeNotes: string[] = [];
+  const infoNotes: string[] = [];
   const warningNotes: string[] = [];
   for (const entry of listChannelDoctorEntries(collectConfiguredChannelIds(params.cfg), {
     cfg: params.cfg,
@@ -309,9 +306,10 @@ export async function runChannelDoctorConfigSequences(params: {
       continue;
     }
     changeNotes.push(...result.changeNotes);
+    infoNotes.push(...(result.infoNotes ?? []));
     warningNotes.push(...result.warningNotes);
   }
-  return { changeNotes, warningNotes };
+  return { changeNotes, warningNotes, ...(infoNotes.length > 0 ? { infoNotes } : {}) };
 }
 
 /** Collect compatibility migrations from configured channel doctor adapters in order. */
@@ -319,19 +317,16 @@ export function collectChannelDoctorCompatibilityMutations(
   cfg: OpenClawConfig,
   options: { env?: NodeJS.ProcessEnv } = {},
 ): ChannelDoctorConfigMutation[] {
-  const channelIds = collectConfiguredChannelIds(cfg);
-  if (channelIds.length === 0) {
-    return [];
+  const preserved = preserveUnavailableChannelConfig({ cfg, env: options.env });
+  if (preserved) {
+    return [preserved];
   }
+  const channelIds = collectConfiguredChannelIds(cfg);
   const mutations: ChannelDoctorConfigMutation[] = [];
   let nextCfg = cfg;
   for (const entry of listChannelDoctorEntries(channelIds, { cfg, env: options.env })) {
     const mutation = entry.doctor.normalizeCompatibilityConfig?.({ cfg: nextCfg });
-    if (!mutation || mutation.changes.length === 0) {
-      continue;
-    }
-    mutations.push(mutation);
-    nextCfg = mutation.config;
+    nextCfg = appendChannelDoctorMutation(mutations, nextCfg, mutation);
   }
   return mutations;
 }
@@ -341,6 +336,10 @@ export async function collectChannelDoctorStaleConfigMutations(
   cfg: OpenClawConfig,
   options: { env?: NodeJS.ProcessEnv; channelIds?: readonly string[] } = {},
 ): Promise<ChannelDoctorConfigMutation[]> {
+  const preserved = preserveUnavailableChannelConfig({ cfg, env: options.env });
+  if (preserved) {
+    return [preserved];
+  }
   const mutations: ChannelDoctorConfigMutation[] = [];
   let nextCfg = cfg;
   const channelIds = options.channelIds ?? collectConfiguredChannelIds(cfg);
@@ -349,11 +348,7 @@ export async function collectChannelDoctorStaleConfigMutations(
     env: options.env,
   })) {
     const mutation = await entry.doctor.cleanStaleConfig?.({ cfg: nextCfg });
-    if (!mutation || mutation.changes.length === 0) {
-      continue;
-    }
-    mutations.push(mutation);
-    nextCfg = mutation.config;
+    nextCfg = appendChannelDoctorMutation(mutations, nextCfg, mutation);
   }
   return mutations;
 }
@@ -412,6 +407,10 @@ export async function collectChannelDoctorRepairMutations(params: {
   doctorFixCommand: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<ChannelDoctorConfigMutation[]> {
+  const preserved = preserveUnavailableChannelConfig(params);
+  if (preserved) {
+    return [preserved];
+  }
   const mutations: ChannelDoctorConfigMutation[] = [];
   let nextCfg = params.cfg;
   for (const entry of listChannelDoctorEntries(collectConfiguredChannelIds(params.cfg), {
@@ -423,28 +422,9 @@ export async function collectChannelDoctorRepairMutations(params: {
       doctorFixCommand: params.doctorFixCommand,
       ...(params.env ? { env: params.env } : {}),
     });
-    if (!mutation || mutation.changes.length === 0) {
-      if (mutation?.warnings?.length) {
-        mutations.push({ config: nextCfg, changes: [], warnings: mutation.warnings });
-      }
-      continue;
-    }
-    mutations.push(mutation);
-    nextCfg = mutation.config;
+    nextCfg = appendChannelDoctorMutation(mutations, nextCfg, mutation);
   }
   return mutations;
-}
-
-/** Collect plugin-provided empty allowlist warning lines for one channel/account context. */
-export function collectChannelDoctorEmptyAllowlistExtraWarnings(
-  params: ChannelDoctorEmptyAllowlistLookupParams,
-): string[] {
-  return collectEmptyAllowlistExtraWarningsForEntries(
-    listChannelDoctorEntries([params.channelName], {
-      cfg: params.cfg ?? {},
-    }),
-    params,
-  );
 }
 
 /** Return true when a channel doctor owns empty group-allowlist warning behavior. */

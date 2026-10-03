@@ -7,11 +7,13 @@ import {
   unwrapKnownShellMultiplexerInvocation,
 } from "./exec-wrapper-resolution.js";
 import {
+  NUSHELL_INLINE_COMMAND_FLAGS,
   POSIX_INLINE_COMMAND_FLAGS,
   isPowerShellInlineRestCommandFlag,
   resolveInlineCommandMatch,
   resolvePowerShellInlineCommandMatch,
 } from "./shell-inline-command.js";
+import { POSIX_SHELL_WRAPPERS } from "./shell-wrapper-resolution.js";
 
 // System-run command helpers keep argv authoritative while still exposing a
 // human-readable shell preview when the wrapper shape is unambiguous.
@@ -70,15 +72,9 @@ type SystemRunCommandDisplay = {
 };
 
 const POSIX_OR_POWERSHELL_INLINE_WRAPPER_NAMES = new Set([
-  "ash",
-  "bash",
-  "dash",
-  "fish",
-  "ksh",
+  ...POSIX_SHELL_WRAPPERS,
   "powershell",
   "pwsh",
-  "sh",
-  "zsh",
 ]);
 
 function unwrapShellWrapperArgv(argv: string[]): string[] {
@@ -102,9 +98,11 @@ function hasTrailingPositionalArgvAfterInlineCommand(argv: string[]): boolean {
   const inlineCommandIndex =
     wrapper === "powershell" || wrapper === "pwsh"
       ? resolvePowerShellInlineCommandMatch(wrapperArgv).valueTokenIndex
-      : resolveInlineCommandMatch(wrapperArgv, POSIX_INLINE_COMMAND_FLAGS, {
-          allowCombinedC: true,
-        }).valueTokenIndex;
+      : wrapper === "nu"
+        ? resolveNushellInlineCommandValueTokenIndex(wrapperArgv)
+        : resolveInlineCommandMatch(wrapperArgv, POSIX_INLINE_COMMAND_FLAGS, {
+            allowCombinedC: true,
+          }).valueTokenIndex;
   if (inlineCommandIndex === null) {
     return false;
   }
@@ -115,6 +113,26 @@ function hasTrailingPositionalArgvAfterInlineCommand(argv: string[]): boolean {
     return false;
   }
   return wrapperArgv.slice(inlineCommandIndex + 1).some((entry) => entry.trim().length > 0);
+}
+
+function resolveNushellInlineCommandValueTokenIndex(argv: string[]): number | null {
+  for (let i = 1; i < argv.length; i += 1) {
+    const arg = argv[i]?.trim() ?? "";
+    if (!arg || arg === "--") {
+      return null;
+    }
+    const equalsIndex = arg.indexOf("=");
+    if (equalsIndex === -1) {
+      continue;
+    }
+    const flag = arg.slice(0, equalsIndex).toLowerCase();
+    if (flag.startsWith("--") && NUSHELL_INLINE_COMMAND_FLAGS.has(flag)) {
+      return i;
+    }
+  }
+  return resolveInlineCommandMatch(argv, NUSHELL_INLINE_COMMAND_FLAGS, {
+    allowCombinedC: true,
+  }).valueTokenIndex;
 }
 
 function buildSystemRunCommandDisplay(
@@ -146,10 +164,9 @@ function normalizeRawCommandText(rawCommand?: unknown): string | null {
   return typeof rawCommand === "string" && rawCommand.trim().length > 0 ? rawCommand.trim() : null;
 }
 
-export function validateSystemRunCommandConsistency(params: {
+function validateSystemRunCommandConsistency(params: {
   argv: string[];
   rawCommand?: string | null;
-  allowLegacyShellText?: boolean;
 }): SystemRunCommandValidation {
   const raw = normalizeRawCommandText(params.rawCommand);
   const display = buildSystemRunCommandDisplay(params.argv, raw);
@@ -158,10 +175,7 @@ export function validateSystemRunCommandConsistency(params: {
     // rawCommand is display-only metadata. Reject mismatches so approvals cannot
     // show one command while executing a different argv.
     const matchesCanonicalArgv = raw === display.commandText;
-    const matchesLegacyShellText =
-      params.allowLegacyShellText === true &&
-      display.previewText !== null &&
-      raw === display.previewText;
+    const matchesLegacyShellText = display.previewText !== null && raw === display.previewText;
     if (!matchesCanonicalArgv && !matchesLegacyShellText) {
       return {
         ok: false,
@@ -189,16 +203,6 @@ export function resolveSystemRunCommandRequest(params: {
   command?: unknown;
   rawCommand?: unknown;
 }): ResolvedSystemRunCommand {
-  return resolveSystemRunCommandWithMode(params, true);
-}
-
-function resolveSystemRunCommandWithMode(
-  params: {
-    command?: unknown;
-    rawCommand?: unknown;
-  },
-  allowLegacyShellText: boolean,
-): ResolvedSystemRunCommand {
   const raw = normalizeRawCommandText(params.rawCommand);
   const command = Array.isArray(params.command) ? params.command : [];
   if (command.length === 0) {
@@ -222,7 +226,6 @@ function resolveSystemRunCommandWithMode(
   const validation = validateSystemRunCommandConsistency({
     argv,
     rawCommand: raw,
-    allowLegacyShellText,
   });
   if (!validation.ok) {
     return {

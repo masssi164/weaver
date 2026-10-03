@@ -1,57 +1,102 @@
 // Shared daemon install runtime/path helpers for service plan generation.
 import fs from "node:fs";
 import path from "node:path";
-import { resolvePreferredNodePath } from "../daemon/runtime-paths.js";
 import {
-  emitNodeRuntimeWarning,
-  type DaemonInstallWarnFn,
-} from "./daemon-install-runtime-warning.js";
+  resolveBunRuntimeInfo,
+  resolvePinnedDaemonRuntimePath,
+  resolvePreferredBunPath,
+  resolvePreferredNodePath,
+} from "../daemon/runtime-paths.js";
+import type { GatewayServiceEnvironmentValueSource } from "../daemon/service-types.js";
+import { resolveOpenClawPackageRootSync } from "../infra/openclaw-root.js";
+import type { DaemonInstallWarnFn } from "./daemon-install-runtime-warning.js";
 import type { GatewayDaemonRuntime } from "./daemon-runtime.js";
 
+export type GatewayInstallPlan = {
+  runtime: GatewayDaemonRuntime;
+  programArguments: string[];
+  workingDirectory?: string;
+  environment: Record<string, string | undefined>;
+  environmentValueSources?: Record<string, GatewayServiceEnvironmentValueSource | undefined>;
+};
+
 /** Detect source-checkout dev mode from the current CLI entrypoint. */
-export function resolveGatewayDevMode(argv: string[] = process.argv): boolean {
+function resolveGatewayDevMode(argv: string[] = process.argv): boolean {
   const entry = argv[1];
   const normalizedEntry = entry?.replaceAll("\\", "/");
-  return normalizedEntry?.includes("/src/") && normalizedEntry.endsWith(".ts");
+  return (
+    normalizedEntry !== undefined &&
+    normalizedEntry.includes("/src/") &&
+    normalizedEntry.endsWith(".ts")
+  );
 }
 
-/** Resolve dev-mode and Node path inputs for daemon service install planning. */
+/** Use the running Bun only when implicit Node discovery found no supported runtime. */
+export async function resolveRunningBunFallback(params: {
+  env: Record<string, string | undefined>;
+  /** Null carries an already completed discovery with no supported Node. */
+  nodePath?: string | null;
+}): Promise<string | undefined> {
+  if (!process.versions.bun) {
+    return undefined;
+  }
+  const nodePath =
+    params.nodePath === undefined
+      ? await resolvePreferredNodePath({ env: params.env, runtime: "node" })
+      : params.nodePath;
+  if (
+    nodePath ||
+    (await resolveBunRuntimeInfo(process.execPath, undefined, params.env)).status !== "supported"
+  ) {
+    return undefined;
+  }
+  return process.execPath;
+}
+
+/** Resolve dev-mode and executable inputs for daemon service install planning. */
 export async function resolveDaemonInstallRuntimeInputs(params: {
   env: Record<string, string | undefined>;
   runtime: GatewayDaemonRuntime;
+  runtimeExplicit?: boolean;
   devMode?: boolean;
-  nodePath?: string;
-}): Promise<{ devMode: boolean; nodePath?: string }> {
-  const devMode = params.devMode ?? resolveGatewayDevMode();
-  const nodePath =
-    params.nodePath ??
-    (await resolvePreferredNodePath({
-      env: params.env,
-      runtime: params.runtime,
-    }));
-  return { devMode, nodePath };
-}
-
-/** Emit runtime warnings for daemon install command arguments. */
-export async function emitDaemonInstallRuntimeWarning(params: {
-  env: Record<string, string | undefined>;
-  runtime: GatewayDaemonRuntime;
-  programArguments: string[];
+  runtimePath?: string;
+  pinnedRuntimePath?: string;
+  wrapperPath?: string;
   warn?: DaemonInstallWarnFn;
-  title: string;
-}): Promise<void> {
-  await emitNodeRuntimeWarning({
-    env: params.env,
-    runtime: params.runtime,
-    nodeProgram: params.programArguments[0],
-    warn: params.warn,
-    title: params.title,
-  });
+}): Promise<{ devMode: boolean; runtime: GatewayDaemonRuntime; runtimePath?: string }> {
+  const devMode = params.devMode ?? resolveGatewayDevMode();
+  if (params.wrapperPath?.trim()) {
+    return { devMode, runtime: params.runtime, runtimePath: params.runtimePath };
+  }
+  const pinnedRuntimePath =
+    params.pinnedRuntimePath === undefined
+      ? undefined
+      : await resolvePinnedDaemonRuntimePath(params.pinnedRuntimePath, params.runtime, params.env);
+  const runtimePath =
+    pinnedRuntimePath ??
+    params.runtimePath ??
+    (params.runtime === "bun"
+      ? await resolvePreferredBunPath({ env: params.env, runtime: params.runtime })
+      : await resolvePreferredNodePath({ env: params.env, runtime: params.runtime }));
+  if (
+    params.runtime === "node" &&
+    !params.runtimeExplicit &&
+    params.pinnedRuntimePath === undefined &&
+    params.runtimePath === undefined &&
+    runtimePath === undefined
+  ) {
+    const bunPath = await resolveRunningBunFallback({ env: params.env, nodePath: null });
+    if (bunPath) {
+      params.warn?.("No supported Node runtime was found; using the running Bun for the service.");
+      return { devMode, runtime: "bun", runtimePath: bunPath };
+    }
+  }
+  return { devMode, runtime: params.runtime, runtimePath };
 }
 
-/** Return the Node binary directory that should be added to daemon PATH. */
-export function resolveDaemonNodeBinDir(nodePath?: string): string[] | undefined {
-  const trimmed = nodePath?.trim();
+/** Return the runtime binary directory that should be added to daemon PATH. */
+export function resolveDaemonRuntimeBinDir(runtimePath?: string): string[] | undefined {
+  const trimmed = runtimePath?.trim();
   if (!trimmed || !path.isAbsolute(trimmed)) {
     return undefined;
   }
@@ -92,7 +137,7 @@ function addUniquePathDir(dirs: string[], dir: string | undefined): void {
 }
 
 /** Resolve the OpenClaw CLI binary directory from argv/PATH for daemon PATH. */
-export function resolveDaemonOpenClawBinDir(
+function resolveDaemonOpenClawBinDir(
   params: {
     argv?: string[];
     env?: Record<string, string | undefined>;
@@ -131,7 +176,14 @@ export function resolveDaemonOpenClawBinDir(
     }
     const candidateRealpath = safeRealpathSync(candidate, realpathSync);
     if (argvRealpath && candidateRealpath && candidateRealpath !== argvRealpath) {
-      continue;
+      // Update invokes dist/index.js; the same installation's shim targets openclaw.mjs.
+      const activeRoot = resolveOpenClawPackageRootSync({ argv1: argvRealpath });
+      if (
+        !activeRoot ||
+        resolveOpenClawPackageRootSync({ argv1: candidateRealpath }) !== activeRoot
+      ) {
+        continue;
+      }
     }
     addUniquePathDir(dirs, segment);
   }
@@ -139,15 +191,15 @@ export function resolveDaemonOpenClawBinDir(
   return dirs.length > 0 ? dirs : undefined;
 }
 
-/** Merge Node and OpenClaw binary directories for the daemon service PATH. */
+/** Merge runtime and OpenClaw binary directories for the daemon service PATH. */
 export function resolveDaemonServicePathDirs(params: {
-  nodePath?: string;
+  runtimePath?: string;
   argv?: string[];
   env?: Record<string, string | undefined>;
   platform?: NodeJS.Platform;
 }): string[] | undefined {
   const dirs: string[] = [];
-  for (const dir of resolveDaemonNodeBinDir(params.nodePath) ?? []) {
+  for (const dir of resolveDaemonRuntimeBinDir(params.runtimePath) ?? []) {
     addUniquePathDir(dirs, dir);
   }
   for (const dir of resolveDaemonOpenClawBinDir(params) ?? []) {

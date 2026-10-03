@@ -1,4 +1,6 @@
-// Control UI module implements activity model behavior.
+import { asNullableObjectRecord as readRecord } from "@openclaw/normalization-core/record-coerce";
+import { normalizeNullableString as toTrimmedString } from "@openclaw/normalization-core/string-coerce";
+import { redactToolPayloadText } from "../../lib/browser-redact.ts";
 import { formatUnknownText, truncateText } from "../../lib/format.ts";
 
 const ACTIVITY_ENTRY_LIMIT = 100;
@@ -12,6 +14,9 @@ export type ActivityEntry = {
   runId: string;
   sessionKey?: string;
   toolName: string;
+  entryKind: "tool" | "answer_candidate";
+  itemId?: string;
+  candidateStatus?: "candidate" | "superseded" | "selected";
   status: ActivityStatus;
   startedAt: number;
   updatedAt: number;
@@ -28,7 +33,8 @@ const ACTIVITY_STATUS_SUMMARY_LABELS: Record<ActivityStatus, string> = {
   error: "failed",
 };
 
-type ToolActivityEvent = {
+type ActivityEvent = {
+  stream: "tool" | "item";
   runId: string;
   ts: number;
   receivedAt: number;
@@ -37,56 +43,23 @@ type ToolActivityEvent = {
   data: Record<string, unknown>;
 };
 
-const SECRET_PATTERNS: Array<[RegExp, string]> = [
-  [/\b(Authorization|Cookie|Set-Cookie)\s*:\s*[^\n\r]+/gi, "$1: [redacted]"],
-  [/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[redacted]"],
-  [
-    /\b(api[_.-]?key|token|secret|password|passwd|authorization)\b(["'])(\s*:\s*)"(?:\\.|[^"\\\r\n])*"/gi,
-    '$1$2$3"[redacted]"',
-  ],
-  [
-    /\b(api[_.-]?key|token|secret|password|passwd|authorization)\b(["'])(\s*:\s*)'(?:\\.|[^'\\\r\n])*'/gi,
-    "$1$2$3'[redacted]'",
-  ],
-  [
-    /\b(api[_.-]?key|token|secret|password|passwd|authorization)\b(\s*[:=]\s*)["']?[^"',\s}]+/gi,
-    "$1$2[redacted]",
-  ],
-  [
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-    "[redacted private key]",
-  ],
-  [
-    /(^|[\s"'`=])(?:\/Users\/|\/home\/|\/var\/folders\/|[A-Za-z]:\\)[^\s"'`,;]+/g,
-    "$1[redacted path]",
-  ],
-];
-
-function toTrimmedString(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-function readRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
-
-export function parseToolActivityEvent(
+export function parseActivityEvent(
   payload: unknown,
   receivedAt = Date.now(),
-): ToolActivityEvent | null {
+): ActivityEvent | null {
   const record = readRecord(payload);
   const runId = toTrimmedString(record?.runId);
   const data = readRecord(record?.data);
-  if (!record || record.stream !== "tool" || !runId || !data) {
+  const isTool = record?.stream === "tool";
+  const isAnswerCandidate =
+    record?.stream === "item" && toTrimmedString(data?.kind) === "answer_candidate";
+  if (!record || (!isTool && !isAnswerCandidate) || !runId || !data) {
     return null;
   }
   const sessionKey = toTrimmedString(record.sessionKey);
   const agentId = toTrimmedString(record.agentId);
   return {
+    stream: isTool ? "tool" : "item",
     runId,
     ts: typeof record.ts === "number" ? record.ts : receivedAt,
     receivedAt,
@@ -138,21 +111,16 @@ function stringifyOutput(value: unknown): string | null {
   }
 }
 
-function redactSensitiveText(value: string): string {
-  return SECRET_PATTERNS.reduce(
-    (text, [pattern, replacement]) => text.replace(pattern, replacement),
-    value,
-  );
-}
-
 function buildOutputPreview(value: unknown): { text?: string; truncated: boolean } {
   const raw = stringifyOutput(value);
   if (!raw) {
     return { truncated: false };
   }
-  const redacted = redactSensitiveText(raw);
+  const redacted = redactToolPayloadText(raw);
   const truncated = truncateText(redacted, ACTIVITY_OUTPUT_PREVIEW_LIMIT);
-  return { text: truncated.text, truncated: truncated.truncated };
+  // A sliced preview can retain the whole output after the raw event is evicted.
+  // Copy its characters here so the bounded Activity entry owns only its preview.
+  return { text: Array.from(truncated.text).join(""), truncated: truncated.truncated };
 }
 
 function countArgumentFields(value: unknown): number {
@@ -193,20 +161,19 @@ function resolveStatus(data: Record<string, unknown>): ActivityStatus {
   return "done";
 }
 
-function statusLabel(status: ActivityStatus): string {
-  return ACTIVITY_STATUS_SUMMARY_LABELS[status];
-}
-
 function buildSummary(toolName: string, status: ActivityStatus, hiddenArgCount: number): string {
   const argText = `${hiddenArgCount} argument${hiddenArgCount === 1 ? "" : "s"} hidden`;
-  return `${toolName} ${statusLabel(status)}; ${argText}`;
+  return `${toolName} ${ACTIVITY_STATUS_SUMMARY_LABELS[status]}; ${argText}`;
 }
 
 export function updateToolActivity(
   entries: ActivityEntry[],
-  payload: ToolActivityEvent,
+  payload: ActivityEvent,
 ): ActivityEntry[] {
   const data = payload.data ?? {};
+  if (payload.stream === "item") {
+    return updateAnswerCandidateActivity(entries, payload);
+  }
   const toolCallId = toTrimmedString(data.toolCallId);
   if (!toolCallId) {
     return entries;
@@ -229,6 +196,7 @@ export function updateToolActivity(
     runId: payload.runId,
     ...(payload.sessionKey ? { sessionKey: payload.sessionKey } : {}),
     toolName,
+    entryKind: "tool",
     status,
     startedAt: existing?.startedAt ?? startedAt,
     updatedAt: now,
@@ -241,5 +209,47 @@ export function updateToolActivity(
   const next = existing
     ? entries.map((entry) => (entry.id === id ? nextEntry : entry))
     : [...entries, nextEntry];
-  return next.slice(-ACTIVITY_ENTRY_LIMIT);
+  return next.length > ACTIVITY_ENTRY_LIMIT ? next.slice(-ACTIVITY_ENTRY_LIMIT) : next;
+}
+
+function readAnswerCandidateStatus(value: unknown): "candidate" | "superseded" | "selected" | null {
+  return value === "candidate" || value === "superseded" || value === "selected" ? value : null;
+}
+
+function updateAnswerCandidateActivity(
+  entries: ActivityEntry[],
+  payload: ActivityEvent,
+): ActivityEntry[] {
+  const itemId = toTrimmedString(payload.data.itemId);
+  const candidateStatus = readAnswerCandidateStatus(payload.data.status);
+  if (!itemId || !candidateStatus) {
+    return entries;
+  }
+  const id = `${payload.runId}:answer_candidate:${itemId}`;
+  const existing = entries.find((entry) => entry.id === id);
+  const now = payload.receivedAt;
+  const startedAt = existing?.startedAt ?? payload.ts;
+  const preview = buildOutputPreview(payload.data.progressText);
+  const nextEntry: ActivityEntry = {
+    id,
+    toolCallId: itemId,
+    itemId,
+    runId: payload.runId,
+    ...(payload.sessionKey ? { sessionKey: payload.sessionKey } : {}),
+    toolName: "answer_candidate",
+    entryKind: "answer_candidate",
+    candidateStatus,
+    status: candidateStatus === "candidate" ? "running" : "done",
+    startedAt,
+    updatedAt: now,
+    durationMs: Math.max(0, now - startedAt),
+    outputTruncated: preview.truncated || existing?.outputTruncated === true,
+    summary: `answer_candidate.${candidateStatus}`,
+    hiddenArgumentCount: 0,
+    ...(preview.text ? { outputPreview: preview.text } : {}),
+  };
+  const next = existing
+    ? entries.map((entry) => (entry.id === id ? nextEntry : entry))
+    : [...entries, nextEntry];
+  return next.length > ACTIVITY_ENTRY_LIMIT ? next.slice(-ACTIVITY_ENTRY_LIMIT) : next;
 }

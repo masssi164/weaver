@@ -1,16 +1,11 @@
-// Matrix plugin module implements logger behavior.
 import { format } from "node:util";
-import { redactSensitiveText } from "openclaw/plugin-sdk/logging-core";
 import type { RuntimeLogger } from "openclaw/plugin-sdk/plugin-runtime";
+// security-runtime exports the same redaction helper without logging-core's
+// diagnostic/config graph, which doctor enumeration must not cold-load.
+import { redactSensitiveText } from "openclaw/plugin-sdk/security-runtime";
 import { getMatrixRuntime } from "../../runtime.js";
 
-type Logger = {
-  trace: (module: string, ...messageOrObject: unknown[]) => void;
-  debug: (module: string, ...messageOrObject: unknown[]) => void;
-  info: (module: string, ...messageOrObject: unknown[]) => void;
-  warn: (module: string, ...messageOrObject: unknown[]) => void;
-  error: (module: string, ...messageOrObject: unknown[]) => void;
-};
+type Logger = Pick<ConsoleLogger, "trace" | "debug" | "info" | "warn" | "error">;
 
 export function noop(): void {
   // no-op
@@ -56,10 +51,6 @@ export class ConsoleLogger {
       runtimeLogger[level](message);
       return;
     }
-    if (level === "debug") {
-      console.debug(message);
-      return;
-    }
     console[level](message);
   }
 
@@ -84,8 +75,7 @@ export class ConsoleLogger {
   }
 }
 
-const defaultLogger = new ConsoleLogger();
-let activeLogger: Logger = defaultLogger;
+let activeLogger: Logger = new ConsoleLogger();
 
 export const LogService = {
   setLogger(logger: Logger): void {

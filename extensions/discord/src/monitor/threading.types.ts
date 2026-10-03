@@ -1,8 +1,7 @@
-// Discord type declarations define plugin contracts.
 import type { APIAttachment, APIStickerItem } from "discord-api-types/v10";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { createReplyReferencePlanner } from "openclaw/plugin-sdk/reply-reference";
-import type { ChannelType, Client, MessageCreateListener } from "../internal/discord.js";
+import type { ChannelType, Client, DiscordMessageDispatchData } from "../internal/discord.js";
 import type { DiscordChannelConfigResolved } from "./allow-list.js";
 
 export type DiscordThreadChannel = {
@@ -47,7 +46,7 @@ export type DiscordThreadStarterRestAuthor = {
   discriminator?: string | null;
 };
 
-export type DiscordThreadStarterRestMember = {
+type DiscordThreadStarterRestMember = {
   nick?: string | null;
   displayName?: string | null;
   roles?: string[];
@@ -55,14 +54,17 @@ export type DiscordThreadStarterRestMember = {
 
 export type DiscordThreadStarterRestMessage = {
   content?: string | null;
+  components?: unknown;
+  attachments?: APIAttachment[] | null;
   embeds?: DiscordThreadStarterRestEmbed[] | null;
   message_snapshots?: Array<{ message?: DiscordThreadStarterRestSnapshotMessage | null }> | null;
+  sticker_items?: APIStickerItem[] | null;
   member?: DiscordThreadStarterRestMember | null;
   author?: DiscordThreadStarterRestAuthor | null;
   timestamp?: string | null;
 };
 
-export type DiscordMessageEvent = Parameters<MessageCreateListener["handle"]>[0];
+export type DiscordMessageEvent = DiscordMessageDispatchData;
 
 export type DiscordReplyDeliveryPlan = {
   deliverTarget: string;

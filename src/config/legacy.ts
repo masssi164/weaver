@@ -3,6 +3,9 @@ import { LEGACY_CONFIG_MIGRATION_RULES as LEGACY_CONFIG_RULES } from "../command
 import type { LegacyConfigRule } from "./legacy.shared.js";
 import type { LegacyConfigIssue } from "./types.js";
 
+export { migratePersistedImplicitMainRoster } from "./legacy.roster.js";
+export { migrateLegacyContextBudgetConfig } from "./legacy.context-budget.js";
+
 // Legacy checks use raw dotted paths so doctor can report exact config keys.
 function getPathValue(root: Record<string, unknown>, path: string[]): unknown {
   let cursor: unknown = root;
@@ -22,6 +25,15 @@ export function findLegacyConfigIssues(
   extraRules: LegacyConfigRule[] = [],
   _touchedPaths?: ReadonlyArray<ReadonlyArray<string>>,
 ): LegacyConfigIssue[] {
+  return findLegacyConfigRuleIssues(raw, [...LEGACY_CONFIG_RULES, ...extraRules], sourceRaw);
+}
+
+/** Evaluate exactly the rules selected by the migration owner. */
+export function findLegacyConfigRuleIssues(
+  raw: unknown,
+  rules: readonly LegacyConfigRule[],
+  sourceRaw?: unknown,
+): LegacyConfigIssue[] {
   if (!raw || typeof raw !== "object") {
     return [];
   }
@@ -29,7 +41,7 @@ export function findLegacyConfigIssues(
   const sourceRoot =
     sourceRaw && typeof sourceRaw === "object" ? (sourceRaw as Record<string, unknown>) : root;
   const issues: LegacyConfigIssue[] = [];
-  for (const rule of [...LEGACY_CONFIG_RULES, ...extraRules]) {
+  for (const rule of rules) {
     const cursor = getPathValue(root, rule.path);
     if (cursor !== undefined && (!rule.match || rule.match(cursor, root))) {
       if (rule.requireSourceLiteral) {

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseBatchSource } from "./config-set-input.js";
+import { parseBatchSource, parseConfigSetCurrentExpectation } from "./config-set-input.js";
 
 function withBatchFile<T>(prefix: string, contents: string, run: (batchPath: string) => T): T {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -17,8 +17,50 @@ function withBatchFile<T>(prefix: string, contents: string, run: (batchPath: str
 }
 
 describe("config set input parsing", () => {
-  it("returns null when no batch options are provided", () => {
-    expect(parseBatchSource({})).toBeNull();
+  it("parses absent and strict JSON current-value expectations", () => {
+    expect(parseConfigSetCurrentExpectation({ expectCurrentAbsent: true })).toEqual({
+      kind: "absent",
+    });
+    expect(parseConfigSetCurrentExpectation({ expectCurrentJson: "null" })).toEqual({
+      kind: "json",
+      value: null,
+    });
+    expect(
+      parseConfigSetCurrentExpectation({ expectCurrentJson: '{"enabled":true,"ports":[1,2]}' }),
+    ).toEqual({
+      kind: "json",
+      value: { enabled: true, ports: [1, 2] },
+    });
+  });
+
+  it.each([
+    {
+      name: "both expectation flags",
+      options: { expectCurrentAbsent: true, expectCurrentJson: "null" },
+      message: "choose either --expect-current-absent or --expect-current-json",
+    },
+    {
+      name: "malformed expected JSON",
+      options: { expectCurrentJson: "{enabled:true}" },
+      message: "--expect-current-json must be valid JSON",
+    },
+    {
+      name: "non-finite expected number",
+      options: { expectCurrentJson: "1e999" },
+      message: "--expect-current-json must be valid JSON",
+    },
+    {
+      name: "batch mode",
+      options: { expectCurrentAbsent: true, batchJson: "[]" },
+      message: "cannot be combined with batch mode",
+    },
+    {
+      name: "dry-run",
+      options: { expectCurrentAbsent: true, dryRun: true },
+      message: "cannot be combined with --dry-run",
+    },
+  ] as const)("rejects $name with a current-value expectation", ({ options, message }) => {
+    expect(() => parseConfigSetCurrentExpectation(options)).toThrow(message);
   });
 
   it("rejects using both --batch-json and --batch-file", () => {
@@ -60,6 +102,11 @@ describe("config set input parsing", () => {
   it.each([
     { name: "malformed payload", batchJson: "{", message: "Failed to parse --batch-json:" },
     {
+      name: "empty batch payload",
+      batchJson: "[]",
+      message: "--batch-json must contain at least one config update.",
+    },
+    {
       name: "non-array payload",
       batchJson: '{"path":"gateway.auth.mode","value":"token"}',
       message: "--batch-json must be a JSON array.",
@@ -78,31 +125,50 @@ describe("config set input parsing", () => {
     expect(() => parseBatchSource({ batchJson })).toThrow(message);
   });
 
-  it("parses valid --batch-file payloads", () => {
+  it("rejects --batch-file when the file does not exist", () => {
+    expect(() =>
+      parseBatchSource({
+        batchFile: "/nonexistent/path/batch.json5",
+      }),
+    ).toThrow("--batch-file not found: /nonexistent/path/batch.json5");
+  });
+
+  it("rejects a directory passed as --batch-file", () => {
+    const batchPath = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-config-set-directory-"));
+    try {
+      expect(() => parseBatchSource({ batchFile: batchPath })).toThrow(
+        `--batch-file must be a regular file: ${batchPath}. Choose a JSON5 input file and try again.`,
+      );
+    } finally {
+      fs.rmSync(batchPath, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects --batch-file payloads above the config mutation limit", () => {
     withBatchFile(
-      "openclaw-config-set-input-",
-      '[{"path":"gateway.auth.mode","value":"token"}]',
+      "openclaw-config-set-input-oversized-",
+      " ".repeat(8 * 1024 * 1024 + 1),
       (batchPath) => {
-        const parsed = parseBatchSource({
-          batchFile: batchPath,
-        });
-        expect(parsed).toEqual([
-          {
-            path: "gateway.auth.mode",
-            value: "token",
-          },
-        ]);
+        expect(() => parseBatchSource({ batchFile: batchPath })).toThrow(
+          "--batch-file exceeds the 8 MiB supported maximum (8388608 bytes)",
+        );
       },
     );
   });
 
-  it("rejects malformed --batch-file payloads", () => {
-    withBatchFile("openclaw-config-set-input-invalid-", "{}", (batchPath) => {
-      expect(() =>
-        parseBatchSource({
-          batchFile: batchPath,
-        }),
-      ).toThrow("--batch-file must be a JSON array.");
+  it("accepts --batch-file at exactly the size limit", () => {
+    const content = '[{"path":"gateway.port","value":19000}]'.padEnd(8 * 1024 * 1024, " ");
+    withBatchFile("openclaw-config-set-input-boundary-", content, (batchPath) => {
+      const parsed = parseBatchSource({ batchFile: batchPath });
+      expect(parsed).toEqual([{ path: "gateway.port", value: 19000 }]);
     });
+  });
+
+  it("rejects batch entries with non-finite numbers", () => {
+    expect(() =>
+      parseBatchSource({
+        batchJson: '[{"path":"channels.custom.timeout","value":1e999}]',
+      }),
+    ).toThrow("Value must be a finite number");
   });
 });

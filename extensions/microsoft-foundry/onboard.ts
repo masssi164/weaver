@@ -1,14 +1,14 @@
-// Microsoft Foundry setup module handles plugin onboarding behavior.
 import type { ProviderAuthContext } from "openclaw/plugin-sdk/core";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import { readResponseTextLimited } from "openclaw/plugin-sdk/provider-http";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   normalizeOptionalString,
   normalizeStringifiedOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import {
-  azLoginDeviceCode,
   azLoginDeviceCodeWithOptions,
   execAz,
   getAccessTokenResult,
@@ -56,42 +56,33 @@ function listFoundryResources(subscriptionId?: string): FoundryResourceOption[] 
       if (!account.resourceGroup) {
         continue;
       }
-      if (account.kind === "OpenAI") {
-        const endpoint = extractFoundryEndpoint(account.endpoint);
-        if (!endpoint) {
-          continue;
-        }
-        resources.push({
-          id: account.id,
-          accountName: account.name,
-          kind: "OpenAI",
-          location: account.location,
-          resourceGroup: account.resourceGroup,
-          endpoint,
-          projects: [],
-        });
+      if (account.kind !== "OpenAI" && account.kind !== "AIServices") {
         continue;
       }
-      if (account.kind !== "AIServices") {
-        continue;
-      }
-      const customSubdomain = normalizeOptionalString(account.customSubdomain);
-      const endpoint = customSubdomain
-        ? `https://${customSubdomain}.services.ai.azure.com`
-        : undefined;
+      const customSubdomain =
+        account.kind === "AIServices"
+          ? normalizeOptionalString(account.customSubdomain)
+          : undefined;
+      const endpoint =
+        account.kind === "OpenAI"
+          ? extractFoundryEndpoint(account.endpoint)
+          : customSubdomain
+            ? `https://${customSubdomain}.services.ai.azure.com`
+            : undefined;
       if (!endpoint) {
         continue;
       }
       resources.push({
         id: account.id,
         accountName: account.name,
-        kind: "AIServices",
+        kind: account.kind,
         location: account.location,
         resourceGroup: account.resourceGroup,
         endpoint,
-        projects: Array.isArray(account.projects)
-          ? account.projects.filter((project): project is string => typeof project === "string")
-          : [],
+        projects:
+          account.kind === "AIServices" && Array.isArray(account.projects)
+            ? account.projects.filter((project): project is string => typeof project === "string")
+            : [],
       });
     }
     return resources;
@@ -146,7 +137,7 @@ export async function selectFoundryResource(
     throw new Error(buildCreateFoundryHint(selectedSub));
   }
   if (resources.length === 1) {
-    const only = resources[0];
+    const only = expectDefined(resources[0], "single Microsoft Foundry resource");
     await ctx.prompter.note(
       `Using ${only.kind === "AIServices" ? "Azure AI Foundry" : "Azure OpenAI"} resource: ${only.accountName}`,
       "Foundry Resource",
@@ -166,7 +157,10 @@ export async function selectFoundryResource(
         .join(" | "),
     })),
   });
-  return resources.find((resource) => resource.id === selectedResourceId) ?? resources[0];
+  return (
+    resources.find((resource) => resource.id === selectedResourceId) ??
+    expectDefined(resources[0], "fallback Microsoft Foundry resource")
+  );
 }
 
 export async function selectFoundryDeployment(
@@ -184,7 +178,7 @@ export async function selectFoundryDeployment(
     );
   }
   if (supported.length === 1) {
-    const only = supported[0];
+    const only = expectDefined(supported[0], "single Microsoft Foundry deployment");
     await ctx.prompter.note(`Using deployment: ${only.name}`, "Model Deployment");
     return { selected: only, supported };
   }
@@ -199,7 +193,8 @@ export async function selectFoundryDeployment(
     })),
   });
   const selected =
-    supported.find((deployment) => deployment.name === selectedDeploymentName) ?? supported[0];
+    supported.find((deployment) => deployment.name === selectedDeploymentName) ??
+    expectDefined(supported[0], "fallback Microsoft Foundry deployment");
   return { selected, supported };
 }
 
@@ -420,7 +415,7 @@ export async function promptApiKeyEndpointAndModel(
   });
 }
 
-export function buildFoundryConnectionTest(params: {
+function buildFoundryConnectionTest(params: {
   endpoint: string;
   modelId: string;
   modelNameHint?: string | null;
@@ -483,7 +478,7 @@ function extractTenantSuggestions(rawMessage: string): Array<{ id: string; label
   return suggestions;
 }
 
-export function isValidTenantIdentifier(value: string): boolean {
+function isValidTenantIdentifier(value: string): boolean {
   const trimmed = normalizeOptionalString(value) ?? "";
   if (!trimmed) {
     return false;
@@ -543,7 +538,7 @@ export async function loginWithTenantFallback(
   ctx: ProviderAuthContext,
 ): Promise<{ account: AzAccount | null; tenantId?: string }> {
   try {
-    await azLoginDeviceCode();
+    await azLoginDeviceCodeWithOptions({});
     return { account: getLoggedInAccount() };
   } catch (error) {
     const message = formatErrorMessage(error);
@@ -613,7 +608,7 @@ export async function testFoundryConnection(params: {
           FOUNDRY_CONNECTION_TEST_ERROR_BODY_LIMIT_BYTES,
         ).catch(() => "");
         await params.ctx.prompter.note(
-          `Endpoint is reachable but returned 400 Bad Request - check your deployment name and API version.\n${body.slice(0, 200)}`,
+          `Endpoint is reachable but returned 400 Bad Request - check your deployment name and API version.\n${truncateUtf16Safe(body, 200)}`,
           "Connection Test",
         );
       } else if (!res.ok) {
@@ -622,7 +617,7 @@ export async function testFoundryConnection(params: {
           FOUNDRY_CONNECTION_TEST_ERROR_BODY_LIMIT_BYTES,
         ).catch(() => "");
         await params.ctx.prompter.note(
-          `Warning: test request returned ${res.status}. ${body.slice(0, 200)}\nProceeding anyway - you can fix the endpoint later.`,
+          `Warning: test request returned ${res.status}. ${truncateUtf16Safe(body, 200)}\nProceeding anyway - you can fix the endpoint later.`,
           "Connection Test",
         );
       } else {

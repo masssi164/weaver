@@ -1,6 +1,8 @@
 // Hashes installed plugin index records for change detection.
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { safeStatSync } from "@openclaw/fs-safe/path";
+import { stableStringify } from "@openclaw/normalization-core/stable-stringify";
 import type { PluginDiagnostic } from "./manifest-types.js";
 
 /** File metadata signature used to skip unchanged installed plugin files. */
@@ -17,6 +19,11 @@ function hashString(value: string): string {
 /** Hashes JSON-serializable data with SHA-256. */
 export function hashJson(value: unknown): string {
   return hashString(JSON.stringify(value));
+}
+
+/** Hashes JSON-like data independently of object property insertion order. */
+export function hashStableJson(value: unknown): string {
+  return hashString(stableStringify(value));
 }
 
 /** Safely hashes a file, optionally recording required-file diagnostics. */
@@ -45,39 +52,8 @@ export function safeHashFile(params: {
 
 /** Reads a safe file signature for installed plugin index freshness checks. */
 export function safeFileSignature(filePath: string): InstalledPluginFileSignature | undefined {
-  try {
-    const stat = fs.statSync(filePath);
-    if (!stat.isFile()) {
-      return undefined;
-    }
-    return {
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      ctimeMs: stat.ctimeMs,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-/** Compares current file metadata with a stored installed-plugin file signature. */
-export function fileSignatureMatches(
-  filePath: string,
-  signature: InstalledPluginFileSignature | undefined,
-): boolean | undefined {
-  if (!signature) {
-    return undefined;
-  }
-  if (typeof signature.ctimeMs !== "number") {
-    return undefined;
-  }
-  const current = safeFileSignature(filePath);
-  if (!current) {
-    return false;
-  }
-  return (
-    current.size === signature.size &&
-    current.mtimeMs === signature.mtimeMs &&
-    current.ctimeMs === signature.ctimeMs
-  );
+  const stat = safeStatSync(filePath);
+  return stat?.isFile()
+    ? { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs }
+    : undefined;
 }

@@ -1,30 +1,23 @@
-/**
- * Classifies embedded-agent run results for model fallback decisions.
- */
-import { GENERIC_EXTERNAL_RUN_FAILURE_TEXT } from "../../auto-reply/reply/agent-runner-failure-copy.js";
 import { isSilentReplyPayloadText } from "../../auto-reply/tokens.js";
-import { classifyFailoverReason } from "../embedded-agent-helpers/errors.js";
-import type { FailoverReason } from "../embedded-agent-helpers/types.js";
-import { isGpt5ModelId } from "../gpt5-prompt-overlay.js";
-import type { ModelFallbackResultClassification } from "../model-fallback.js";
+import { classifyFailoverReason } from "../failover/classify.js";
+import type { FailoverReason } from "../failover/signal.js";
+import { GENERIC_EXTERNAL_RUN_FAILURE_TEXT } from "../failover/user-copy.js";
+import type { ModelFallbackResultClassification } from "../model-fallback-attempt.js";
 import {
   hasCommittedOutboundDeliveryEvidence,
   hasVisibleAgentPayload,
 } from "./delivery-evidence.js";
+import {
+  EMBEDDED_CYBER_FAILOVER_TRIGGER_CODE,
+  isReplaySafeEmbeddedOpenAiCyberRefusal,
+} from "./embedded-cyber-failover.js";
 import type { EmbeddedAgentRunResult } from "./types.js";
 
 type ProviderErrorPayloadFailoverReason = Extract<
   FailoverReason,
-  "auth" | "auth_permanent" | "billing" | "rate_limit" | "server_error" | "overloaded"
+  "auth" | "auth_permanent" | "billing" | "rate_limit" | "server_error" | "overloaded" | "timeout"
 >;
 
-/**
- * Classifies embedded-agent terminal results for model fallback decisions.
- *
- * The classifier only flags failed invisible outcomes or exact generic external-runner failure
- * copy; delivered messages, deliberate silent replies, hook blocks, and aborts must not trigger
- * another model attempt.
- */
 function isEmbeddedAgentRunResult(value: unknown): value is EmbeddedAgentRunResult {
   return Boolean(
     value &&
@@ -72,7 +65,7 @@ export function mergeEmbeddedAgentRunResultForModelFallbackExhaustion(params: {
   };
 }
 
-export function hasDeliberateSilentTerminalReply(result: EmbeddedAgentRunResult): boolean {
+function hasDeliberateSilentTerminalReply(result: EmbeddedAgentRunResult): boolean {
   if (result.meta.error?.kind === "hook_block") {
     return true;
   }
@@ -81,17 +74,28 @@ export function hasDeliberateSilentTerminalReply(result: EmbeddedAgentRunResult)
   );
 }
 
+function hasDeliverableAssistantPayload(result: {
+  payloads?: unknown;
+  meta?: { finalAssistantVisibleText?: unknown };
+}): boolean {
+  const finalVisibleText = result.meta?.finalAssistantVisibleText;
+  return (
+    (typeof finalVisibleText === "string" &&
+      finalVisibleText.trim().length > 0 &&
+      !isSilentReplyPayloadText(finalVisibleText)) ||
+    hasVisibleAgentPayload(result, {
+      includeErrorPayloads: false,
+      includeReasoningPayloads: false,
+      requireTerminalContent: true,
+    })
+  );
+}
+
 function hasNonTextVisiblePayloadContent(
   payload: NonNullable<EmbeddedAgentRunResult["payloads"]>[number],
 ): boolean {
-  const { text: _text, ...payloadWithoutText } = payload;
-  return hasVisibleAgentPayload(
-    { payloads: [payloadWithoutText] },
-    {
-      includeErrorPayloads: false,
-      includeReasoningPayloads: false,
-    },
-  );
+  const { isError: _isError, text: _text, ...payloadWithoutText } = payload;
+  return hasDeliverableAssistantPayload({ payloads: [payloadWithoutText] });
 }
 
 function classifyGenericExternalRunFailurePayload(params: {
@@ -110,6 +114,7 @@ function classifyGenericExternalRunFailurePayload(params: {
     payload?.isReasoning === true ||
     typeof text !== "string" ||
     text.trim() !== GENERIC_EXTERNAL_RUN_FAILURE_TEXT ||
+    !payload ||
     hasNonTextVisiblePayloadContent(payload)
   ) {
     return null;
@@ -125,9 +130,9 @@ function classifyGenericExternalRunFailurePayload(params: {
 function classifyHarnessResult(params: {
   provider: string;
   model: string;
-  result: EmbeddedAgentRunResult;
+  classification: EmbeddedAgentRunResult["meta"]["agentHarnessResultClassification"];
 }): ModelFallbackResultClassification {
-  switch (params.result.meta.agentHarnessResultClassification) {
+  switch (params.classification) {
     case "empty":
       return {
         message: `${params.provider}/${params.model} ended without a visible assistant reply`,
@@ -166,13 +171,14 @@ function classifyProviderErrorPayloadReason(
     case "rate_limit":
     case "server_error":
     case "overloaded":
+    case "timeout":
       return failoverReason;
     default:
       return null;
   }
 }
 
-/** Returns a fallback classification when an embedded run failed without user-visible output. */
+/** Delivered output, deliberate silence, hook blocks, and aborts must not trigger another model. */
 export function classifyEmbeddedAgentRunResultForModelFallback(params: {
   provider: string;
   model: string;
@@ -183,7 +189,11 @@ export function classifyEmbeddedAgentRunResultForModelFallback(params: {
   if (!isEmbeddedAgentRunResult(params.result)) {
     return null;
   }
+  if (params.result.meta.agentMeta?.providerRefusal?.category === "misalignment") {
+    return null;
+  }
   if (
+    params.result.meta.intentionalTerminalCompletion === "tool-batch" ||
     params.result.meta.aborted ||
     params.hasDirectlySentBlockReply === true ||
     params.hasBlockReplyPipelineOutput === true
@@ -191,10 +201,8 @@ export function classifyEmbeddedAgentRunResultForModelFallback(params: {
     return null;
   }
   const incompleteTurn = params.result.meta.error?.kind === "incomplete_turn";
-  if (incompleteTurn && params.result.meta.error?.fallbackSafe !== true) {
-    return null;
-  }
-  const fallbackSafeIncompleteTurn = incompleteTurn;
+  const fallbackSafeIncompleteTurn =
+    incompleteTurn && params.result.meta.error?.fallbackSafe === true;
   if (params.result.meta.replayInvalid === true && !fallbackSafeIncompleteTurn) {
     return null;
   }
@@ -206,6 +214,23 @@ export function classifyEmbeddedAgentRunResultForModelFallback(params: {
     // bypass a policy decision rather than recover a malformed model result.
     return null;
   }
+  if (
+    isReplaySafeEmbeddedOpenAiCyberRefusal({
+      provider: params.provider,
+      result: params.result,
+    })
+  ) {
+    return {
+      message: `${params.provider}/${params.model} was refused by OpenAI cyber policy`,
+      reason: "unknown",
+      code: EMBEDDED_CYBER_FAILOVER_TRIGGER_CODE,
+      preserveResultOnExhaustion: true,
+      preserveResultPriority: 100,
+    };
+  }
+  if (incompleteTurn && !fallbackSafeIncompleteTurn) {
+    return null;
+  }
   const payloads = params.result.payloads ?? [];
   const genericExternalFailureClassification = classifyGenericExternalRunFailurePayload({
     provider: params.provider,
@@ -215,19 +240,7 @@ export function classifyEmbeddedAgentRunResultForModelFallback(params: {
   if (genericExternalFailureClassification) {
     return genericExternalFailureClassification;
   }
-  if (
-    typeof params.result.meta.finalAssistantVisibleText === "string" &&
-    params.result.meta.finalAssistantVisibleText.trim().length > 0 &&
-    !isSilentReplyPayloadText(params.result.meta.finalAssistantVisibleText)
-  ) {
-    return null;
-  }
-  if (
-    hasVisibleAgentPayload(params.result, {
-      includeErrorPayloads: false,
-      includeReasoningPayloads: false,
-    })
-  ) {
+  if (hasDeliverableAssistantPayload(params.result)) {
     return null;
   }
   if (fallbackSafeIncompleteTurn) {
@@ -247,7 +260,7 @@ export function classifyEmbeddedAgentRunResultForModelFallback(params: {
   const harnessClassification = classifyHarnessResult({
     provider: params.provider,
     model: params.model,
-    result: params.result,
+    classification: params.result.meta.agentHarnessResultClassification,
   });
   if (harnessClassification) {
     return harnessClassification;
@@ -269,29 +282,27 @@ export function classifyEmbeddedAgentRunResultForModelFallback(params: {
     };
   }
 
-  if (!isGpt5ModelId(params.model)) {
+  // Once the shared visibility owner finds no deliverable assistant payload,
+  // empty and reasoning-only output must advance fallback for every model.
+  if (hasDeliberateSilentTerminalReply(params.result)) {
     return null;
   }
-
-  // Legacy GPT-5 handling treats empty/reasoning-only payloads as fallback
-  // candidates, while deliberate silent replies remain successful terminal work.
-  if (payloads.length === 0 && hasDeliberateSilentTerminalReply(params.result)) {
+  if (errorText.trim()) {
     return null;
   }
-  if (payloads.length === 0) {
-    return {
-      message: `${params.provider}/${params.model} ended without a visible assistant reply`,
-      reason: "format",
-      code: "empty_result",
-    };
+  if (
+    payloads.some((payload) => payload.isError === true && hasNonTextVisiblePayloadContent(payload))
+  ) {
+    return null;
   }
-  if (payloads.every((payload) => payload.isReasoning === true)) {
-    return {
-      message: `${params.provider}/${params.model} ended with reasoning only`,
-      reason: "format",
-      code: "reasoning_only_result",
-    };
-  }
-
-  return null;
+  const assistantPayloads = payloads.filter((payload) => payload.isError !== true);
+  return classifyHarnessResult({
+    provider: params.provider,
+    model: params.model,
+    classification:
+      assistantPayloads.length > 0 &&
+      assistantPayloads.every((payload) => payload.isReasoning === true)
+        ? "reasoning-only"
+        : "empty",
+  });
 }

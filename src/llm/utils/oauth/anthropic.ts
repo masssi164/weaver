@@ -5,14 +5,12 @@
  * It is only intended for CLI use, not browser environments.
  */
 
-import type { Server } from "node:http";
 import { toErrorObject } from "../../../infra/errors.js";
 import { readResponseWithLimit } from "../../../infra/http-body.js";
+import { startOAuthLoopbackCallbackServer } from "../../../infra/oauth-loopback-callback.js";
 import {
   generateOAuthState,
   generatePKCE,
-  oauthErrorHtml,
-  oauthSuccessHtml,
   parseOAuthAuthorizationInput,
   resolveOAuthTokenExpiresAt,
 } from "../../../plugin-sdk/provider-oauth-runtime.js";
@@ -30,20 +28,12 @@ import type {
 } from "./types.js";
 
 type CallbackServerInfo = {
-  server: Server;
   cancelWait: () => void;
   waitForCode: () => Promise<{ code: string; state: string } | null>;
+  close: () => Promise<void>;
 };
 
-type NodeApis = {
-  createServer: typeof import("node:http").createServer;
-};
-
-let nodeApis: NodeApis | null = null;
-let nodeApisPromise: Promise<NodeApis> | null = null;
-
-const decode = (s: string) => atob(s);
-const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
+const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const DEFAULT_CALLBACK_HOST = "127.0.0.1";
@@ -51,6 +41,7 @@ const LOOPBACK_CALLBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const CALLBACK_PORT = 53692;
 const CALLBACK_PATH = "/callback";
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
+const CALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 
 function resolveCallbackHost(env: NodeJS.ProcessEnv = process.env): string {
   const host = env.OPENCLAW_OAUTH_CALLBACK_HOST?.trim() || DEFAULT_CALLBACK_HOST;
@@ -65,22 +56,6 @@ const SCOPES =
 
 /** Max response body bytes for Anthropic OAuth token endpoint (16 MiB). */
 const OAUTH_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
-
-async function getNodeApis(): Promise<NodeApis> {
-  if (nodeApis) {
-    return nodeApis;
-  }
-  if (!nodeApisPromise) {
-    if (typeof process === "undefined" || (!process.versions?.node && !process.versions?.bun)) {
-      throw new Error("Anthropic OAuth is only available in Node.js environments");
-    }
-    nodeApisPromise = import("node:http").then((httpModule) => ({
-      createServer: httpModule.createServer,
-    }));
-  }
-  nodeApis = await nodeApisPromise;
-  return nodeApis;
-}
 
 function formatErrorDetails(error: unknown): string {
   if (error instanceof Error) {
@@ -156,79 +131,37 @@ function parseTokenCredentials(
 }
 
 async function startCallbackServer(expectedState: string): Promise<CallbackServerInfo> {
-  const { createServer } = await getNodeApis();
-
-  return new Promise((resolve, reject) => {
-    let settleWait: ((value: { code: string; state: string } | null) => void) | undefined;
-    const waitForCodePromise = new Promise<{ code: string; state: string } | null>(
-      (resolveWait) => {
-        let settled = false;
-        settleWait = (value) => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          resolveWait(value);
-        };
-      },
-    );
-
-    const server = createServer((req, res) => {
-      try {
-        const url = new URL(req.url || "", "http://localhost");
-        if (url.pathname !== CALLBACK_PATH) {
-          res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(oauthErrorHtml("Callback route not found."));
-          return;
-        }
-
-        const code = url.searchParams.get("code");
-        const state = url.searchParams.get("state");
-        const error = url.searchParams.get("error");
-
-        if (error) {
-          res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(oauthErrorHtml("Anthropic authentication did not complete.", `Error: ${error}`));
-          return;
-        }
-
-        if (!code || !state) {
-          res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(oauthErrorHtml("Missing code or state parameter."));
-          return;
-        }
-
-        if (state !== expectedState) {
-          res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(oauthErrorHtml("State mismatch."));
-          return;
-        }
-
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(oauthSuccessHtml("Anthropic authentication completed. You can close this window."));
-        settleWait?.({ code, state });
-      } catch {
-        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end("Internal error");
-      }
-    });
-
-    const callbackHost = resolveCallbackHost();
-
-    server.on("error", (err) => {
-      reject(err);
-    });
-
-    server.listen(CALLBACK_PORT, callbackHost, () => {
-      resolve({
-        server,
-        cancelWait: () => {
-          settleWait?.(null);
-        },
-        waitForCode: () => waitForCodePromise,
-      });
-    });
+  if (typeof process === "undefined" || (!process.versions?.node && !process.versions?.bun)) {
+    throw new Error("Anthropic OAuth is only available in Node.js environments");
+  }
+  const callback = await startOAuthLoopbackCallbackServer({
+    redirectUrl: REDIRECT_URI,
+    expectedState,
+    timeoutMs: CALLBACK_TIMEOUT_MS,
+    bindHostname: resolveCallbackHost(),
   });
+  return {
+    cancelWait: () => void callback.close(),
+    waitForCode: async () => {
+      try {
+        const result = await callback.waitForCallback();
+        if (result.type === "oauth_error") {
+          throw new Error(`Anthropic OAuth error: ${result.error}`);
+        }
+        return { code: result.code, state: result.state };
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (error.message === "OAuth callback timeout" ||
+            error.message === "OAuth callback cancelled")
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    close: callback.close,
+  };
 }
 
 async function postJson(
@@ -302,7 +235,7 @@ async function exchangeAuthorizationCode(
 /**
  * Login with Anthropic OAuth (authorization code + PKCE)
  */
-export async function loginAnthropic(options: {
+async function loginAnthropic(options: {
   onAuth: (info: { url: string; instructions?: string }) => void;
   onPrompt: (prompt: OAuthPrompt) => Promise<string>;
   onProgress?: (message: string) => void;
@@ -316,6 +249,14 @@ export async function loginAnthropic(options: {
 
   let code: string | undefined;
   let state: string | undefined;
+  const applyAuthorizationInput = (input: string) => {
+    const parsed = parseOAuthAuthorizationInput(input);
+    if (parsed.state && parsed.state !== expectedState) {
+      throw new Error("OAuth state mismatch");
+    }
+    code = parsed.code;
+    state = parsed.state ?? expectedState;
+  };
 
   try {
     throwIfOAuthLoginAborted(options.signal);
@@ -365,12 +306,7 @@ export async function loginAnthropic(options: {
         code = result.code;
         state = result.state;
       } else if (manualInput) {
-        const parsed = parseOAuthAuthorizationInput(manualInput);
-        if (parsed.state && parsed.state !== expectedState) {
-          throw new Error("OAuth state mismatch");
-        }
-        code = parsed.code;
-        state = parsed.state ?? expectedState;
+        applyAuthorizationInput(manualInput);
       }
 
       if (!code) {
@@ -379,12 +315,7 @@ export async function loginAnthropic(options: {
           throw toErrorObject(manualError, "Non-Error thrown");
         }
         if (manualInput) {
-          const parsed = parseOAuthAuthorizationInput(manualInput);
-          if (parsed.state && parsed.state !== expectedState) {
-            throw new Error("OAuth state mismatch");
-          }
-          code = parsed.code;
-          state = parsed.state ?? expectedState;
+          applyAuthorizationInput(manualInput);
         }
       }
     } else {
@@ -408,12 +339,7 @@ export async function loginAnthropic(options: {
         options.signal,
         server.cancelWait,
       );
-      const parsed = parseOAuthAuthorizationInput(input);
-      if (parsed.state && parsed.state !== expectedState) {
-        throw new Error("OAuth state mismatch");
-      }
-      code = parsed.code;
-      state = parsed.state ?? expectedState;
+      applyAuthorizationInput(input);
     }
 
     if (!code) {
@@ -427,14 +353,14 @@ export async function loginAnthropic(options: {
     options.onProgress?.("Exchanging authorization code for tokens...");
     return exchangeAuthorizationCode(code, state, verifier, REDIRECT_URI, options.signal);
   } finally {
-    server.server.close();
+    await server.close();
   }
 }
 
 /**
  * Refresh Anthropic OAuth token
  */
-export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
+async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
   let responseBody: string;
   try {
     responseBody = await postJson(TOKEN_URL, {
@@ -477,9 +403,4 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
   getApiKey(credentials: OAuthCredentials): string {
     return credentials.access;
   },
-};
-
-export const testing = {
-  resolveCallbackHost,
-  redirectUri: REDIRECT_URI,
 };
