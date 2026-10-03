@@ -1,0 +1,78 @@
+name: Weaver distribution
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+      - "cutover/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weaver-distribution-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  distribution-boundary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up the upstream-supported Node version
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.16.0
+
+      - name: Verify the signed upstream release object
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(node -p "JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).upstream.release")"
+          commit="$(node -p "JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).upstream.commit")"
+          git fetch --no-tags https://github.com/openclaw/openclaw.git "refs/tags/${tag}:refs/tags/${tag}"
+          test "$(git cat-file -t "${tag}")" = tag
+          test "$(git rev-parse "${tag}^{}")" = "${commit}"
+          tag_object="$(git rev-parse "${tag}^{tag}")"
+          verification="$(gh api "repos/openclaw/openclaw/git/tags/${tag_object}")"
+          test "$(jq -r '.verification.verified' <<<"${verification}")" = true
+          test "$(jq -r '.verification.reason' <<<"${verification}")" = valid
+          test "$(jq -r '.object.sha' <<<"${verification}")" = "${commit}"
+          release="$(gh api "repos/openclaw/openclaw/releases/tags/${tag}")"
+          test "$(jq -r '.draft' <<<"${release}")" = false
+          test "$(jq -r '.prerelease' <<<"${release}")" = false
+
+      - name: Enforce the thin-fork boundary
+        run: node scripts/weaver/check-fork-boundary.mjs
+
+      - name: Verify untouched upstream runtime and dependency inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(node -p "JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).upstream.commit")"
+          git diff --exit-code "${commit}" HEAD -- src extensions packages package.json pnpm-lock.yaml pnpm-workspace.yaml LICENSE THIRD_PARTY_NOTICES.md
+          git diff --check "${commit}" HEAD
+
+      - name: Install the locked upstream dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Test every Weaver distribution seam
+        run: pnpm exec vitest run --config scripts/weaver/vitest.config.mjs
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high
+
+      - name: Build the pinned upstream runtime
+        run: pnpm build

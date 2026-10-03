@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/openclaw/openclaw",
+    "release": "v2026.9.8",
+    "commit": "fc23bc864e4553c2d215e479eeec47b67a0bf943",
+    "releaseDate": "2026-10-03"
+  },
+  "securityReview": {
+    "reviewedAt": "2026-10-03",
+    "latestReviewedRelease": "v2026.9.8",
+    "latestReviewedCommit": "fc23bc864e4553c2d215e479eeec47b67a0bf943",
+    "latestReviewedReleaseDate": "2026-10-03"
+  },
+  "distributionPaths": [
+    ".github/workflows/weaver-distribution.yml",
+    "README.md",
+    "UPSTREAM.md",
+    "docs/weaver/",
+    "scripts/weaver/check-fork-boundary.mjs",
+    "scripts/weaver/launch-from-runtime-profile.mjs",
+    "scripts/weaver/vitest.config.mjs",
+    "test/scripts/weaver-distribution-seams.test.ts",
+    "weaver.fork-policy.json"
+  ],
+  "approvedPlugins": [],
+  "approvedCorePatches": [],
+  "budgets": {
+    "maxChangedFiles": 12,
+    "maxChangedCoreFiles": 0,
+    "maxNonPluginPatchLines": 2250,
+    "maxSecurityReleaseLagDays": 7,
+    "maxSecurityReviewAgeDays": 14
+  }
+}
