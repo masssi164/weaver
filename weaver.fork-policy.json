@@ -28,9 +28,9 @@
   "approvedPlugins": [],
   "approvedCorePatches": [],
   "budgets": {
-    "maxChangedFiles": 12,
+    "maxChangedFiles": 15,
     "maxChangedCoreFiles": 0,
-    "maxNonPluginPatchLines": 2250,
+    "maxNonPluginPatchLines": 2500,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
   }

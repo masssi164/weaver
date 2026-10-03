@@ -103,3 +103,9 @@ precedence for managed cells.
 
 OpenClaw is MIT-licensed. The upstream copyright and license remain in [LICENSE](LICENSE), and
 incorporated third-party notices remain in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+The original Weaver-owned layer is **EUPL-1.2-or-later**, copyright © 2026 Massimo (GitHub: masssi164).
+See [Weaver licensing](docs/weaver/licensing.md) for the exact scope and
+[the EUPL text](docs/weaver/LICENSE-EUPL-1.2.txt). Earlier licence grants are not revoked.
+[Weaver contribution guidance](docs/weaver/contributing.md) covers DCO sign-off and disclosed
+AI-assisted work. Upstream-oriented contributions retain their applicable upstream licence.
