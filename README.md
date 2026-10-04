@@ -77,6 +77,11 @@ checks signed-tag provenance, unchanged upstream runtime/dependency inputs and r
 Use [OpenClaw documentation](https://docs.openclaw.ai) for upstream behavior. Weaver deployment
 requirements are documented separately and are narrower than a general-purpose OpenClaw install.
 
-The root [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) are retained from
-OpenClaw. This upstream-update commit does not change licensing; the owner-approved Weaver-layer
-EUPL policy is a separate follow-up.
+The root [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) retain OpenClaw's
+MIT terms and incorporated third-party notices. Original Weaver-owned material is licensed under
+**EUPL-1.2-or-later**, with the exact scope and full licence text in
+[Weaver licensing](docs/weaver/licensing.md). Earlier licence grants are not revoked.
+
+Contributions follow the applicable MIT/EUPL boundary and
+[Weaver DCO guidance](docs/weaver/contributing.md). AI-assisted work and communication are welcome
+with appropriate disclosure and human responsibility.
