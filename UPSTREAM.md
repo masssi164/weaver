@@ -46,10 +46,10 @@ upstream release alone is not sufficient evidence. See [Review scope](docs/weave
 2. Start from the new upstream tree; reapply only owned distribution files and refresh their documentation.
 3. Preserve the zero-core-patch rule and review all changed paths against the fork budget.
 4. Install the upstream lockfile and execute distribution, dependency and build checks.
-5. Require the existing ARC, live Matrix and reconstruction evidence before any deployment or readiness claim.
-6. Preserve the previous immutable runtime image and externally stored state generation. Do not roll an
-   older runtime onto state already migrated by a newer one; restore its matching generation instead.
+5. Require live Matrix and current Weave integration evidence for the chosen deployment. If the optional
+   managed-cell design is used, also require its control-plane and reconstruction evidence.
+6. For managed cells, preserve the previous immutable runtime image and matching external state
+   generation. Do not roll an older runtime onto state already migrated by a newer one.
 
-`main` remains unchanged until reviewed admission. No automatic deployment, release, security-limit
-relaxation or history rewrite is authorized by a passing candidate build. The recurring updater in
-issue #39 / PR #41 remains a separate follow-up; this change handles the explicitly requested update.
+A passing candidate build does not authorize deployment, release, security-limit relaxation or
+history rewrite. The recurring updater in issue #39 / PR #41 remains a separate follow-up.

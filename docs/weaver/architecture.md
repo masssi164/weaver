@@ -8,21 +8,25 @@ title: "Weaver architecture"
 
 # Weaver Architecture
 
-Status: target architecture. The repository contains a bootstrap guard and fork-policy evidence;
-it does not yet prove the runtime, infrastructure, or production-readiness claims below.
+Status: deferred design reference. The current Weave release is the standalone collaboration
+product described in [the Weaver README](https://github.com/masssi164/weaver#readme) and
+[Weave epic #1470](https://github.com/masssi164/weave/issues/1470). Broad Agent Runtime Control,
+private cells, external state authorities, workflows and Runners are outside that release. The
+repository contains a bootstrap guard and fork-policy evidence, but no deployed cell-control
+system. The proposals below are not current release acceptance criteria.
 
 ## Ownership
 
-Weaver is the first runtime implementation behind Weave's Agent Runtime Control bounded context.
-It is not a collaboration domain and it is not an identity, authorization, or data plane.
+This document explores a possible managed-cell implementation for optional Weaver deployment.
+Weaver is not a collaboration domain or an identity, authorization, or data plane.
 
-| Owner | Responsibilities |
-| --- | --- |
-| Keycloak | Identity system of record, federation/brokering, organizations, coarse roles, and Weaver entitlement |
+| Owner                 | Responsibilities                                                                                                                                    |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Keycloak              | Identity system of record, federation/brokering, organizations, coarse roles, and Weaver entitlement                                                |
 | Agent Runtime Control | Signed RuntimeProfile desired state, lifecycle, lease/fencing, revocation, workspace/runtime-state references, health, and support-safe correlation |
-| Upstream OpenClaw | Agent loop, sessions, official Matrix plugin, outbound MCP client, memory/skills, and native approval state |
-| Weave domains | Current user/workload authorization, object and argument validation, provider side effects, idempotency, and immutable ActionEvidence |
-| Cell orchestrator | Disposable compute, ephemeral filesystem, network policy, workload identity, resource limits, and teardown |
+| Upstream OpenClaw     | Agent loop, sessions, official Matrix plugin, outbound MCP client, memory/skills, and native approval state                                         |
+| Weave domains         | Current user/workload authorization, object and argument validation, provider side effects, idempotency, and immutable ActionEvidence               |
+| Cell orchestrator     | Disposable compute, ephemeral filesystem, network policy, workload identity, resource limits, and teardown                                          |
 
 A RuntimeProfile configures the maximum runtime capability. It never grants a Files, Calendar,
 Chat, Calls, or other domain permission. An OpenClaw approval records a human runtime decision; it
@@ -30,8 +34,9 @@ also never substitutes for current domain authorization.
 
 ## Identity and protocol path
 
-External LDAP/AD/OIDC/SAML identity sources feed Keycloak. Matrix Authentication Service uses
-Keycloak upstream and serves the Matrix-facing authorization boundary. The cell uses the official
+This is one self-hosted provider arrangement, not a mandatory Weave topology. Keycloak is the
+current self-hosted identity default; supported OIDC/OAuth sources and distinct audience-bound
+Weave and Matrix sessions remain the product boundary. The cell uses the official
 OpenClaw Matrix plugin and a SecretRef-backed credential, not a Keycloak password, OIDC ID token
 or southbound provider configuration.
 
