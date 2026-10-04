@@ -29,7 +29,7 @@ The distribution is based on signed **OpenClaw v2026.9.8**. [UPSTREAM.md](UPSTRE
 
 The managed startup guard verifies the projector's response against the exact profile bytes and cell binding. It rejects literal credentials, additional channels, unsafe paths, and missing verification, then launches the stock OpenClaw gateway with explicit configuration and state paths.
 
-**Managed MCP is still disabled.** The Weave-side MCP contract is for Files and Calendar; conversation uses the Weave Matrix facade. The complete workload-authorization integration must be proven before MCP is enabled in Weaver cells. There is no shared-token, static-header, or human-OAuth fallback.
+**Managed MCP is still disabled.** The Weave-side Files/Calendar MCP contract is separate from the Matrix conversational channel. The complete workload-authorization integration must be proven before MCP is enabled in Weaver cells. There is no shared-token, static-header, or human-OAuth fallback.
 
 Cross-node reconstruction, isolation, Matrix E2EE recovery, workload authorization, backup/restore, accessibility, and chaos evidence remain separate acceptance requirements. See [architecture](docs/weaver/architecture.md) and the [upstream review scope](docs/weaver/upstream-review.md).
 
@@ -55,7 +55,7 @@ The former downstream package-script aliases are intentionally absent. The direc
 
 ## Managed startup
 
-A cell is provisioned by the surrounding Weave control plane, not by interactive OpenClaw onboarding. The following is the launcher interface, not a standalone installation recipe; it requires a trusted projector, a signed profile, and prepared ephemeral directories.
+In the target deployment, the surrounding Weave control plane provisions each cell; interactive OpenClaw onboarding is not the managed startup path. The following is the launcher interface, not a standalone installation recipe; it requires a trusted projector, a signed profile, and prepared ephemeral directories.
 
 ```bash
 node scripts/weaver/launch-from-runtime-profile.mjs \
