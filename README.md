@@ -2,26 +2,26 @@
 
 **A personal agent for your workspace. On your terms.**
 
-Weaver brings the OpenClaw agent runtime into [Weave](https://github.com/masssi164/weave)'s provider-neutral collaboration model. It is a thin, upstream-first distribution — not another agent engine and not a standalone replacement for Weave.
+Weaver is an optional, upstream-first [OpenClaw](https://github.com/openclaw/openclaw) distribution for [Weave](https://github.com/masssi164/weave) organizations. Weave's approved standalone deployment does not require Weaver, Home-core, or an agent control plane.
 
 **Weave provides the collaboration foundation. Weaver is the optional assistant that works within its boundaries.**
 
 [How it fits](#how-weave-and-weaver-fit-together) · [Development](#develop-and-verify) · [Operations](docs/weaver/operations.md) · [Upstream provenance](UPSTREAM.md)
 
-> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Full governed deployment and live Weave integration are still being qualified. A successful build is not a production-readiness claim.
+> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Managed MCP, live Weave integration, Matrix recovery, and external cell-state restoration are unverified. A successful build is not a production-readiness claim.
 
 ## How Weave and Weaver fit together
 
-Weave owns the collaboration context and domain permissions. Weaver supplies the narrow startup and distribution layer for an OpenClaw personal agent assigned to an entitled member.
+Weave owns the collaboration product, its server API, and domain permissions. Weaver supplies an optional OpenClaw runtime distribution. The current release does not require Weaver's broader cell-control design.
 
 The design is **the member's rights, within organization-approved capabilities**. Choosing an assistant must not mean handing it an unrestricted copy of every provider credential or creating a second permission system.
 
-- **Weave:** Files, Calendar, Chat, provider boundaries, and authorization of domain operations.
-- **Agent Runtime Control:** signed RuntimeProfiles, cell lifecycle, leases, fencing, and revocation.
-- **OpenClaw:** the agent loop, Matrix plugin, sessions, skills, memory, MCP client, and native approvals.
-- **Weaver:** connect those responsibilities without duplicating them.
+- **Weave server (approved contract):** product APIs, current member and resource authorization, and provider-backed Files and Calendar operations. Server code is the source for separate User and Admin OpenAPI artifacts and generated product HTTP clients.
+- **Weave Flutter:** native Rust/Matrix SDK chat, with Weave-owned stable room associations.
+- **OpenClaw/Weaver:** the agent loop, official Matrix plugin, sessions, skills, memory, MCP client, and native approvals. Matrix chat does not move behind a proprietary Weave REST API.
+- **Weaver layer:** the small, optional startup and distribution boundary around unchanged upstream runtime code.
 
-Keycloak remains the identity and entitlement authority. A signed RuntimeProfile or an OpenClaw approval is not, by itself, permission for a domain side effect.
+Keycloak is the self-hosted default identity provider; Weave supports OIDC/OAuth identity boundaries without making Keycloak the permanent product boundary. The Weave API, Matrix, and any future Weaver workload use appropriately separated audiences and sessions. A signed RuntimeProfile or OpenClaw approval is not, by itself, permission for a domain side effect.
 
 ## What is available now
 
@@ -31,7 +31,7 @@ The managed startup guard verifies the projector's response against the exact pr
 
 **Managed MCP is still disabled.** The Weave-side Files/Calendar MCP contract is separate from the Matrix conversational channel. The complete workload-authorization integration must be proven before MCP is enabled in Weaver cells. There is no shared-token, static-header, or human-OAuth fallback.
 
-Cross-node reconstruction, isolation, Matrix E2EE recovery, workload authorization, backup/restore, accessibility, and chaos evidence remain separate acceptance requirements. See [architecture](docs/weaver/architecture.md) and the [upstream review scope](docs/weaver/upstream-review.md).
+Cross-node reconstruction, isolation, Matrix E2EE recovery, workload authorization, backup/restore, accessibility, and chaos evidence remain unverified for a managed Weaver deployment. Broad cell orchestration, private Runners, workflows, and context graphs are outside the current Weave release. See the [deferred architecture](docs/weaver/architecture.md) and [upstream review scope](docs/weaver/upstream-review.md).
 
 ## Develop and verify
 
@@ -53,9 +53,9 @@ The focused Vitest configuration runs the complete Weaver seam suite. It neither
 
 The former downstream package-script aliases are intentionally absent. The direct commands above keep OpenClaw's package metadata and lockfiles byte-identical to upstream.
 
-## Managed startup
+## RuntimeProfile guard interface
 
-In the target deployment, the surrounding Weave control plane provisions each cell; interactive OpenClaw onboarding is not the managed startup path. The following is the launcher interface, not a standalone installation recipe; it requires a trusted projector, a signed profile, and prepared ephemeral directories.
+The optional managed-cell design requires a trusted projector, signed profile, and prepared ephemeral directories. This launcher interface is not a standalone installation recipe or a prerequisite for Weave's current release:
 
 ```bash
 node scripts/weaver/launch-from-runtime-profile.mjs \
@@ -70,7 +70,7 @@ node scripts/weaver/launch-from-runtime-profile.mjs \
   -- gateway
 ```
 
-The trusted projector verifies the signed profile. The guard checks its result before starting the gateway. The durability design places persistent data outside the disposable cell: Control Store, immutable WebDAV Workspace Store, encrypted Runtime State Store, and Secret Broker. Local container files are not canonical state.
+The trusted projector verifies the signed profile. The guard checks its result before starting the gateway. The external Control Store, Workspace Store, Runtime State Store, and Secret Broker are a deferred durability design, not deployed capabilities established by this guard.
 
 Read [Operations](docs/weaver/operations.md) before deployment work and [OpenClaw documentation](https://docs.openclaw.ai) for upstream behavior.
 

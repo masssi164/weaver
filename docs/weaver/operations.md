@@ -9,9 +9,10 @@ title: "Weaver operations"
 
 # Weaver Operations
 
-Status: target runbook. The launch guard and repository checks are executable. Lifecycle,
-authorization and infrastructure requirements below need separate evidence; an upstream update
-does not establish production readiness.
+Status: deferred managed-cell runbook. Only the launch guard and repository checks are executable.
+Weave's current release does not require Agent Runtime Control, private cells, Runners, or the
+external stores below. This is a future candidate, not the operator path for the standalone
+product. Lifecycle, authorization and infrastructure requirements need separate evidence.
 
 ## Supported entrypoint
 
