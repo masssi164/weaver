@@ -51,6 +51,8 @@ git diff --check
 
 The focused Vitest configuration runs the complete Weaver seam suite. It neither replaces upstream release validation nor disables upstream tests. The [distribution workflow](.github/workflows/weaver-distribution.yml) also checks signed-tag provenance, untouched upstream inputs, fork limits, and review freshness.
 
+The suite exercises OpenClaw's session MCP client against an isolated loopback endpoint for tool discovery and invocation, checks that operator and Matrix requester OAuth state keys remain separate, and rejects requester-only tools in an operator session. This verifies the client seam only. Live Weave API authorization and the managed-cell workload flow still require integrated validation before MCP can be enabled.
+
 The former downstream package-script aliases are intentionally absent. The direct commands above keep OpenClaw's package metadata and lockfiles byte-identical to upstream.
 
 ## RuntimeProfile guard interface

@@ -20,6 +20,7 @@
     "scripts/weaver/check-fork-boundary.mjs",
     "scripts/weaver/launch-from-runtime-profile.mjs",
     "scripts/weaver/vitest.config.mjs",
+    "test/scripts/weaver-mcp-client-journey.test.ts",
     "test/scripts/weaver-distribution-seams.test.ts",
     "weaver.fork-policy.json"
   ],
