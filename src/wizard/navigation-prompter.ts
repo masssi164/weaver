@@ -27,6 +27,18 @@ type PromptRequest<T, Params> = {
   call: (params: Params) => Promise<T>;
 };
 
+const basePrompterByNavigationPrompter = new WeakMap<WizardPrompter, WizardPrompter>();
+
+function unwrapNavigationPrompter(prompter: WizardPrompter): WizardPrompter {
+  let current = prompter;
+  let base = basePrompterByNavigationPrompter.get(current);
+  while (base) {
+    current = base;
+    base = basePrompterByNavigationPrompter.get(current);
+  }
+  return current;
+}
+
 function inertProgress(): WizardProgress {
   return {
     update: () => {},
@@ -61,46 +73,31 @@ function buildPromptSignature(
   });
 }
 
-function applyNavigation<Params extends { navigation?: unknown }>(
-  params: Params,
-  navigation: { canGoBack: boolean; canGoForward: boolean },
-): Params {
-  return {
-    ...params,
-    navigation,
-  };
-}
-
 class WizardPromptNavigator {
   private cursor = 0;
   private targetIndex: number | undefined;
   private restartRequested = false;
+  private boundaryBackRequested = false;
   private backNavigationDisabled = false;
   private records: Array<PromptRecord | undefined> = [];
 
-  constructor(private readonly base: WizardPrompter) {}
+  constructor(
+    private readonly base: WizardPrompter,
+    private readonly options: { allowBackFromStart?: boolean } = {},
+  ) {
+    basePrompterByNavigationPrompter.set(this.prompter, unwrapNavigationPrompter(base));
+  }
 
   readonly prompter: WizardPrompter = {
-    intro: async (title) => {
-      if (!this.shouldSuppressOutput()) {
-        await this.base.intro(title);
-      }
-    },
-    outro: async (message) => {
-      if (!this.shouldSuppressOutput()) {
-        await this.base.outro(message);
-      }
-    },
-    note: async (message, title) => {
-      if (!this.shouldSuppressOutput()) {
-        await this.base.note(message, title);
-      }
-    },
-    plain: async (message) => {
-      if (!this.shouldSuppressOutput()) {
-        await this.base.plain?.(message);
-      }
-    },
+    intro: (title) => this.display(() => this.base.intro(title)),
+    outro: (message) => this.display(() => this.base.outro(message)),
+    note: (message, title) => this.display(() => this.base.note(message, title)),
+    ...(this.base.deviceCode
+      ? {
+          deviceCode: (params) => this.display(() => this.base.deviceCode?.(params)),
+        }
+      : {}),
+    plain: (message) => this.display(() => this.base.plain?.(message)),
     select: async <T>(params: WizardSelectParams<T>) =>
       await this.prompt<T, WizardSelectParams<T>>({
         kind: "select",
@@ -151,23 +148,48 @@ class WizardPromptNavigator {
       }),
     progress: (label) =>
       this.shouldSuppressOutput() ? inertProgress() : this.base.progress(label),
+    ...(this.base.openUrl
+      ? {
+          openUrl: (url) => this.display(() => this.base.openUrl?.(url)),
+        }
+      : {}),
     disableBackNavigation: () => {
       this.backNavigationDisabled = true;
       this.targetIndex = undefined;
     },
   };
 
-  beginPass() {
-    this.cursor = 0;
-    this.restartRequested = false;
-  }
-
-  hasRestartRequest(): boolean {
-    return this.restartRequested;
+  async run<T>(
+    runner: (prompter: WizardPrompter) => Promise<T>,
+  ): Promise<WizardPromptNavigationScopeOutcome<T>> {
+    while (true) {
+      this.cursor = 0;
+      this.restartRequested = false;
+      this.boundaryBackRequested = false;
+      try {
+        return { status: "completed", value: await runner(this.prompter) };
+      } catch (error) {
+        if (error instanceof WizardNavigationError && error.direction === "back") {
+          if (this.restartRequested) {
+            continue;
+          }
+          if (this.boundaryBackRequested) {
+            return { status: "back" };
+          }
+        }
+        throw error;
+      }
+    }
   }
 
   private shouldSuppressOutput(): boolean {
     return this.targetIndex !== undefined && this.cursor <= this.targetIndex;
+  }
+
+  private async display(write: () => Promise<void> | undefined): Promise<void> {
+    if (!this.shouldSuppressOutput()) {
+      await write();
+    }
   }
 
   private matchingRecord(index: number, kind: PromptKind, signature: string) {
@@ -185,7 +207,7 @@ class WizardPromptNavigator {
     return undefined;
   }
 
-  private remember(index: number, request: PromptRequest<unknown, unknown>, answer: unknown) {
+  private remember<T, Params>(index: number, request: PromptRequest<T, Params>, answer: T) {
     if (!request.cacheAnswer) {
       this.records[index] = undefined;
       this.records.splice(index + 1);
@@ -219,14 +241,18 @@ class WizardPromptNavigator {
     const paramsWithInitial = record
       ? request.withInitial(request.params, record.answer)
       : request.params;
-    const paramsWithNavigation = applyNavigation(paramsWithInitial, {
-      canGoBack: !this.backNavigationDisabled && index > 0,
-      canGoForward: record !== undefined,
-    });
+    const paramsWithNavigation = {
+      ...paramsWithInitial,
+      navigation: {
+        canGoBack:
+          !this.backNavigationDisabled && (index > 0 || this.options.allowBackFromStart === true),
+        canGoForward: record !== undefined,
+      },
+    };
 
     try {
       const answer = await request.call(paramsWithNavigation);
-      this.remember(index, request as PromptRequest<unknown, unknown>, answer);
+      this.remember(index, request, answer);
       this.cursor = index + 1;
       if (this.targetIndex !== undefined && index >= this.targetIndex) {
         this.targetIndex = undefined;
@@ -239,6 +265,14 @@ class WizardPromptNavigator {
           this.targetIndex = undefined;
           return record.answer as T;
         }
+        if (
+          error.direction === "back" &&
+          !this.backNavigationDisabled &&
+          index === 0 &&
+          this.options.allowBackFromStart === true
+        ) {
+          this.boundaryBackRequested = true;
+        }
         if (error.direction === "back" && !this.backNavigationDisabled && index > 0) {
           this.targetIndex = index - 1;
           this.restartRequested = true;
@@ -249,26 +283,20 @@ class WizardPromptNavigator {
   }
 }
 
+type WizardPromptNavigationScopeOutcome<T> = { status: "completed"; value: T } | { status: "back" };
+
+export async function runWizardWithPromptNavigationScope<T>(
+  basePrompter: WizardPrompter,
+  runner: (prompter: WizardPrompter) => Promise<T>,
+): Promise<WizardPromptNavigationScopeOutcome<T>> {
+  return new WizardPromptNavigator(unwrapNavigationPrompter(basePrompter), {
+    allowBackFromStart: true,
+  }).run(runner);
+}
+
 export async function runWizardWithPromptNavigation(
   basePrompter: WizardPrompter,
   runner: (prompter: WizardPrompter) => Promise<void>,
 ): Promise<void> {
-  const navigator = new WizardPromptNavigator(basePrompter);
-
-  while (true) {
-    navigator.beginPass();
-    try {
-      await runner(navigator.prompter);
-      return;
-    } catch (error) {
-      if (
-        error instanceof WizardNavigationError &&
-        error.direction === "back" &&
-        navigator.hasRestartRequest()
-      ) {
-        continue;
-      }
-      throw error;
-    }
-  }
+  await new WizardPromptNavigator(basePrompter).run(runner);
 }

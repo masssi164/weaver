@@ -11,8 +11,6 @@ import {
 import {
   DM_GROUP_ACCESS_REASON,
   type DmGroupAccessReasonCode,
-} from "../plugin-sdk/channel-access-compat.js";
-import {
   readStoreAllowFromForDmPolicy,
   resolveDmGroupAccessWithLists,
 } from "../plugin-sdk/channel-access-compat.js";
@@ -93,26 +91,19 @@ export async function resolveInboundDirectDmAccessWithRuntime(params: {
       : [];
   // Pairing-mode store entries and configured allowlists both support access groups.
   // Expand them separately so the access reason still reflects the source list.
-  const [allowFrom, effectiveStoreAllowFrom] = await Promise.all([
-    expandAllowFromWithAccessGroups({
-      cfg: params.cfg,
-      allowFrom: params.allowFrom,
-      channel: params.channel,
-      accountId: params.accountId,
-      senderId: params.senderId,
-      isSenderAllowed: params.isSenderAllowed,
-      resolveMembership: params.resolveAccessGroupMembership,
-    }),
-    expandAllowFromWithAccessGroups({
-      cfg: params.cfg,
-      allowFrom: storeAllowFrom,
-      channel: params.channel,
-      accountId: params.accountId,
-      senderId: params.senderId,
-      isSenderAllowed: params.isSenderAllowed,
-      resolveMembership: params.resolveAccessGroupMembership,
-    }),
-  ]);
+  const [allowFrom, effectiveStoreAllowFrom] = await Promise.all(
+    [params.allowFrom, storeAllowFrom].map((entries) =>
+      expandAllowFromWithAccessGroups({
+        cfg: params.cfg,
+        allowFrom: entries,
+        channel: params.channel,
+        accountId: params.accountId,
+        senderId: params.senderId,
+        isSenderAllowed: params.isSenderAllowed,
+        resolveMembership: params.resolveAccessGroupMembership,
+      }),
+    ),
+  );
   const access = resolveDmGroupAccessWithLists({
     isGroup: false,
     dmPolicy,
@@ -130,7 +121,7 @@ export async function resolveInboundDirectDmAccessWithRuntime(params: {
   // preserve the legacy direct-DM behavior: command access follows sender allowlist access.
   const commandAuthorized = shouldComputeAuth
     ? (params.runtime.resolveCommandAuthorizedFromAuthorizers?.({
-        useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
+        useAccessGroups: true,
         authorizers: [
           {
             configured: access.effectiveAllowFrom.length > 0,

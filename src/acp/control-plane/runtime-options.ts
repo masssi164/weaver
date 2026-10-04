@@ -1,12 +1,15 @@
 /** Validation and normalization for ACP session runtime options and config controls. */
 import { isAbsolute } from "node:path";
-import { normalizeText } from "@openclaw/acp-core/normalize-text";
-import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
+import type { AcpRuntimeConfigOptionResult } from "@openclaw/acp-core/runtime/types";
+import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString as normalizeText,
+} from "@openclaw/normalization-core/string-coerce";
 import type { AcpSessionRuntimeOptions, SessionAcpMeta } from "../../config/sessions/types.js";
-import { parseStrictPositiveInteger } from "../../infra/parse-finite-number.js";
 import { AcpRuntimeError } from "../runtime/errors.js";
 
-export { normalizeText } from "@openclaw/acp-core/normalize-text";
+export { normalizeOptionalString as normalizeText } from "@openclaw/normalization-core/string-coerce";
 
 const MAX_RUNTIME_MODE_LENGTH = 64;
 const MAX_MODEL_LENGTH = 200;
@@ -176,48 +179,21 @@ export function validateRuntimeOptionPatch(
   }
 
   const next: Partial<AcpSessionRuntimeOptions> = {};
-  if (Object.hasOwn(rawPatch, "runtimeMode")) {
-    if (rawPatch.runtimeMode === undefined) {
-      next.runtimeMode = undefined;
-    } else {
-      next.runtimeMode = validateRuntimeModeInput(rawPatch.runtimeMode);
+  function setOption<K extends Exclude<keyof AcpSessionRuntimeOptions, "backendExtras">>(
+    key: K,
+    validate: (value: unknown) => AcpSessionRuntimeOptions[K],
+  ): void {
+    // Own undefined clears an option; missing and inherited fields leave it unchanged.
+    if (Object.hasOwn(rawPatch, key)) {
+      next[key] = rawPatch[key] === undefined ? undefined : validate(rawPatch[key]);
     }
   }
-  if (Object.hasOwn(rawPatch, "model")) {
-    if (rawPatch.model === undefined) {
-      next.model = undefined;
-    } else {
-      next.model = validateRuntimeModelInput(rawPatch.model);
-    }
-  }
-  if (Object.hasOwn(rawPatch, "thinking")) {
-    if (rawPatch.thinking === undefined) {
-      next.thinking = undefined;
-    } else {
-      next.thinking = validateRuntimeThinkingInput(rawPatch.thinking);
-    }
-  }
-  if (Object.hasOwn(rawPatch, "cwd")) {
-    if (rawPatch.cwd === undefined) {
-      next.cwd = undefined;
-    } else {
-      next.cwd = validateRuntimeCwdInput(rawPatch.cwd);
-    }
-  }
-  if (Object.hasOwn(rawPatch, "permissionProfile")) {
-    if (rawPatch.permissionProfile === undefined) {
-      next.permissionProfile = undefined;
-    } else {
-      next.permissionProfile = validateRuntimePermissionProfileInput(rawPatch.permissionProfile);
-    }
-  }
-  if (Object.hasOwn(rawPatch, "timeoutSeconds")) {
-    if (rawPatch.timeoutSeconds === undefined) {
-      next.timeoutSeconds = undefined;
-    } else {
-      next.timeoutSeconds = validateRuntimeTimeoutSecondsInput(rawPatch.timeoutSeconds);
-    }
-  }
+  setOption("runtimeMode", validateRuntimeModeInput);
+  setOption("model", validateRuntimeModelInput);
+  setOption("thinking", validateRuntimeThinkingInput);
+  setOption("cwd", validateRuntimeCwdInput);
+  setOption("permissionProfile", validateRuntimePermissionProfileInput);
+  setOption("timeoutSeconds", validateRuntimeTimeoutSecondsInput);
   if (Object.hasOwn(rawPatch, "backendExtras")) {
     const rawExtras = rawPatch.backendExtras;
     if (rawExtras === undefined) {
@@ -287,6 +263,42 @@ export function mergeRuntimeOptions(params: {
   });
 }
 
+export function isThinkingConfigKey(key: string): boolean {
+  return RUNTIME_CONFIG_OPTION_ALIASES.thinking.some(
+    (alias) => alias === normalizeLowercaseStringOrEmpty(key),
+  );
+}
+
+/** Reconcile only selected thinking; backend defaults must not become new session overrides. */
+export function reconcileAcceptedRuntimeOptions(
+  options: AcpSessionRuntimeOptions,
+  result: AcpRuntimeConfigOptionResult | void,
+  pendingThinking?: string,
+): AcpSessionRuntimeOptions {
+  if (!result || !options.thinking) {
+    return options;
+  }
+  const thinking = result.configOptions.find(
+    (option) => option.category === "thought_level" || isThinkingConfigKey(option.id),
+  );
+  // Automatic model replay precedes thinking; a still-valid pending selection must survive it.
+  if (
+    pendingThinking &&
+    (thinking?.currentValue === pendingThinking ||
+      thinking?.options?.some((choice) =>
+        "options" in choice
+          ? choice.options.some((option) => option.value === pendingThinking)
+          : choice.value === pendingThinking,
+      ))
+  ) {
+    return options;
+  }
+  return normalizeRuntimeOptions({
+    ...options,
+    thinking: typeof thinking?.currentValue === "string" ? thinking.currentValue : undefined,
+  });
+}
+
 export function resolveRuntimeOptionsFromMeta(meta: SessionAcpMeta): AcpSessionRuntimeOptions {
   const normalized = normalizeRuntimeOptions(meta.runtimeOptions);
   if (normalized.cwd || !meta.cwd) {
@@ -326,47 +338,32 @@ export function buildRuntimeConfigOptionPairs(
 ): Array<[string, string]> {
   const normalized = normalizeRuntimeOptions(options);
   const pairs = new Map<string, string>();
+  const advertisedKeys = buildAdvertisedConfigOptionKeyMap(advertisedConfigOptionKeys);
+  const resolveKey = (key: string) => resolveRuntimeConfigOptionKeyFromMap(key, advertisedKeys);
+  const shouldEmit = (aliases: readonly string[]) =>
+    advertisedKeys.size === 0 || aliases.some((alias) => advertisedKeys.has(alias));
   if (normalized.model) {
-    pairs.set(resolveRuntimeConfigOptionKey("model", advertisedConfigOptionKeys), normalized.model);
+    pairs.set(resolveKey("model"), normalized.model);
   }
-  if (normalized.thinking) {
-    pairs.set(
-      resolveRuntimeConfigOptionKey("thinking", advertisedConfigOptionKeys),
-      normalized.thinking,
-    );
+  if (normalized.thinking && shouldEmit(RUNTIME_CONFIG_OPTION_ALIASES.thinking)) {
+    pairs.set(resolveKey("thinking"), normalized.thinking);
   }
   if (normalized.permissionProfile) {
-    pairs.set(
-      resolveRuntimeConfigOptionKey("approval_policy", advertisedConfigOptionKeys),
-      normalized.permissionProfile,
-    );
+    pairs.set(resolveKey("approval_policy"), normalized.permissionProfile);
   }
   if (
     typeof normalized.timeoutSeconds === "number" &&
-    shouldEmitTimeoutConfigOption(advertisedConfigOptionKeys)
+    shouldEmit(RUNTIME_CONFIG_OPTION_ALIASES.timeoutSeconds)
   ) {
-    pairs.set(
-      resolveRuntimeConfigOptionKey("timeout", advertisedConfigOptionKeys),
-      String(normalized.timeoutSeconds),
-    );
+    pairs.set(resolveKey("timeout"), String(normalized.timeoutSeconds));
   }
   for (const [key, value] of Object.entries(normalized.backendExtras ?? {})) {
-    const wireKey = resolveRuntimeConfigOptionKey(key, advertisedConfigOptionKeys);
+    const wireKey = resolveKey(key);
     if (!pairs.has(wireKey)) {
       pairs.set(wireKey, value);
     }
   }
   return [...pairs.entries()];
-}
-
-function shouldEmitTimeoutConfigOption(advertisedConfigOptionKeys?: readonly string[]): boolean {
-  const advertisedKeys = buildAdvertisedConfigOptionKeyMap(advertisedConfigOptionKeys);
-  return (
-    advertisedKeys.size === 0 ||
-    RUNTIME_CONFIG_OPTION_ALIASES.timeoutSeconds.some((alias) =>
-      advertisedKeys.has(normalizeLowercaseStringOrEmpty(alias)),
-    )
-  );
 }
 
 function buildAdvertisedConfigOptionKeyMap(
@@ -397,9 +394,18 @@ export function resolveRuntimeConfigOptionKey(
   key: string,
   advertisedConfigOptionKeys?: readonly string[],
 ): string {
+  return resolveRuntimeConfigOptionKeyFromMap(
+    key,
+    buildAdvertisedConfigOptionKeyMap(advertisedConfigOptionKeys),
+  );
+}
+
+function resolveRuntimeConfigOptionKeyFromMap(
+  key: string,
+  advertisedKeys: ReadonlyMap<string, string>,
+): string {
   const normalizedKey = normalizeText(key) ?? "";
   const normalizedLookupKey = normalizeLowercaseStringOrEmpty(normalizedKey);
-  const advertisedKeys = buildAdvertisedConfigOptionKeyMap(advertisedConfigOptionKeys);
   if (!normalizedKey || advertisedKeys.size === 0) {
     return normalizedKey;
   }
@@ -425,12 +431,7 @@ export function inferRuntimeOptionPatchFromConfigOption(
   if (normalizedKey === "model") {
     return { model: validateRuntimeModelInput(validated.value) };
   }
-  if (
-    normalizedKey === "thinking" ||
-    normalizedKey === "effort" ||
-    normalizedKey === "thought_level" ||
-    normalizedKey === "reasoning_effort"
-  ) {
+  if (isThinkingConfigKey(normalizedKey)) {
     return { thinking: validateRuntimeThinkingInput(validated.value) };
   }
   if (

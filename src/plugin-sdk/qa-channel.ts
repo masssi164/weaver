@@ -2,7 +2,7 @@
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import {
   createLazyFacadeObjectValue,
-  loadBundledPluginPublicSurfaceModuleSync,
+  loadBundledPluginPublicSurfaceModuleSyncCore,
 } from "./facade-loader.js";
 import type {
   QaBusAttachment,
@@ -13,15 +13,10 @@ import type {
   QaBusStateSnapshot,
   QaBusThread,
   QaBusToolCall,
+  QaTargetParts,
 } from "./qa-channel-protocol.js";
 
 export type * from "./qa-channel-protocol.js";
-
-type QaTargetParts = {
-  chatType: "direct" | "channel" | "group";
-  conversationId: string;
-  threadId?: string;
-};
 
 type FacadeModule = {
   buildQaTarget: (params: QaTargetParts & { threadId?: string | null }) => string;
@@ -55,6 +50,7 @@ type FacadeModule = {
     baseUrl: string;
     accountId: string;
     cursor: number;
+    acknowledgedCursor: number;
     timeoutMs: number;
     signal?: AbortSignal;
   }) => Promise<QaBusPollResult>;
@@ -91,7 +87,7 @@ type FacadeModule = {
 };
 
 function loadFacadeModule(): FacadeModule {
-  return loadBundledPluginPublicSurfaceModuleSync<FacadeModule>({
+  return loadBundledPluginPublicSurfaceModuleSyncCore<FacadeModule>({
     dirName: "qa-channel",
     artifactBasename: "api.js",
   });

@@ -10,9 +10,6 @@ final class NotifyOverlayController {
     static let shared = NotifyOverlayController()
 
     private(set) var model = Model()
-    var isVisible: Bool {
-        self.model.isVisible
-    }
 
     struct Model {
         var title: String = ""
@@ -33,14 +30,19 @@ final class NotifyOverlayController {
         self.dismissTask?.cancel()
         self.model.title = title
         self.model.body = body
-        self.ensureWindow()
-        self.hostingView?.rootView = NotifyOverlayView(controller: self)
         self.presentWindow()
 
         if autoDismissAfter > 0 {
             self.dismissTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(autoDismissAfter * 1_000_000_000))
-                await MainActor.run { self?.dismiss() }
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(autoDismissAfter * 1_000_000_000))
+                } catch {
+                    return
+                }
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+                    self?.dismiss()
+                }
             }
         }
     }
@@ -68,7 +70,7 @@ final class NotifyOverlayController {
             isFirstPresent: isFirst,
             target: target)
         { window in
-            self.updateWindowFrame(animate: true)
+            OverlayPanelFactory.applyFrame(window: self.window, target: self.targetFrame(), animate: true)
             window.orderFrontRegardless()
         }
     }
@@ -94,10 +96,6 @@ final class NotifyOverlayController {
         let visible = screen.visibleFrame
         let origin = CGPoint(x: visible.maxX - size.width - 8, y: visible.maxY - size.height - 8)
         return NSRect(origin: origin, size: size)
-    }
-
-    private func updateWindowFrame(animate: Bool = false) {
-        OverlayPanelFactory.applyFrame(window: self.window, target: self.targetFrame(), animate: animate)
     }
 
     private func measuredHeight() -> CGFloat {

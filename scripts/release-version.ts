@@ -1,6 +1,7 @@
 // Release Version keeps the core and explicitly selected native release trains aligned.
 import fs from "node:fs";
 import path from "node:path";
+import { expectDefined } from "../packages/normalization-core/src/expect.js";
 import {
   canonicalAndroidVersionCode,
   normalizeAndroidVersionCode,
@@ -8,7 +9,7 @@ import {
   renderAndroidReleaseNotes,
   renderAndroidVersionProperties,
 } from "./lib/android-version.ts";
-import { parseReleaseVersion } from "./lib/npm-publish-plan.mjs";
+import { parseReleaseVersion } from "./lib/release-version.mjs";
 
 const MACOS_INFO_PLIST = "apps/macos/Sources/OpenClaw/Resources/Info.plist";
 const ANDROID_CHANGELOG_FILE = "apps/android/CHANGELOG.md";
@@ -100,8 +101,12 @@ export function planReleaseVersion(params: {
   const parsedVersion = parseReleaseVersion(params.version);
   if (!parsedVersion) {
     throw new Error(
-      `Invalid release version '${params.version}'. Expected YYYY.M.PATCH, YYYY.M.PATCH-alpha.N, YYYY.M.PATCH-beta.N, or YYYY.M.PATCH-N.`,
+      `Invalid release version '${params.version}'. Expected YYYY.M.PATCH, YYYY.M.PATCH-beta.N, or YYYY.M.PATCH-N.`,
     );
+  }
+
+  if (parsedVersion.channel === "alpha") {
+    throw new Error("Alpha releases are retired; use a beta prerelease instead.");
   }
 
   const packageVersion =
@@ -131,7 +136,10 @@ export function applyReleaseVersionPlan(plan: ReleaseVersionPlan): void {
       tempPaths.push(tempPath);
     }
     for (const [index, change] of plan.changes.entries()) {
-      fs.renameSync(tempPaths[index], change.path);
+      fs.renameSync(
+        expectDefined(tempPaths[index], `release temp path at index ${index}`),
+        change.path,
+      );
     }
   } finally {
     for (const tempPath of tempPaths) {

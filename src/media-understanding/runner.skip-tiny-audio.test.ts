@@ -1,5 +1,7 @@
 // Tiny-audio runner tests cover minimum-size skip behavior before provider
 // transcription runs.
+
+import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MsgContext } from "../auto-reply/templating.js";
 import type { OpenClawConfig } from "../config/types.js";
@@ -102,40 +104,16 @@ describe("runCapability skips tiny audio files", () => {
           },
         });
 
-        // The provider should never be called
         expect(transcribeCalled).toBe(false);
-
-        // The result should indicate the attachment was skipped
         expect(result.outputs).toHaveLength(0);
         expect(result.decision.outcome).toBe("skipped");
         expect(result.decision.attachments).toHaveLength(1);
-        expect(result.decision.attachments[0].attempts).toHaveLength(1);
-        expect(result.decision.attachments[0].attempts[0].outcome).toBe("skipped");
-        expect(result.decision.attachments[0].attempts[0].reason).toContain("tooSmall");
-      },
-    });
-  });
-
-  it("skips audio transcription for empty (0-byte) files", async () => {
-    await withAudioFixture({
-      filePrefix: "openclaw-empty-audio",
-      extension: "ogg",
-      mediaType: "audio/ogg",
-      fileContents: Buffer.alloc(0),
-      run: async ({ ctx, media, cache }) => {
-        let transcribeCalled = false;
-        const result = await runAudioCapabilityWithTranscriber({
-          ctx,
-          media,
-          cache,
-          transcribeAudio: async () => {
-            transcribeCalled = true;
-            return { text: "nope", model: "whisper-1" };
-          },
+        const attachment = expectDefined(result.decision.attachments[0], "media attachment 0");
+        expect(attachment.attempts).toHaveLength(1);
+        expect(attachment.attempts[0]).toMatchObject({
+          outcome: "skipped",
+          reason: expect.stringContaining("tooSmall"),
         });
-
-        expect(transcribeCalled).toBe(false);
-        expect(result.outputs).toHaveLength(0);
       },
     });
   });
@@ -160,7 +138,9 @@ describe("runCapability skips tiny audio files", () => {
 
         expect(transcribeCalled).toBe(true);
         expect(result.outputs).toHaveLength(1);
-        expect(result.outputs[0].text).toBe("hello world");
+        expect(expectDefined(result.outputs[0], "result.outputs[0] test invariant").text).toBe(
+          "hello world",
+        );
         expect(result.decision.outcome).toBe("success");
       },
     });

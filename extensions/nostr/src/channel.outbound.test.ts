@@ -1,13 +1,22 @@
+import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
 // Nostr tests cover channel.outbound plugin behavior.
 import { verifyChannelMessageAdapterCapabilityProofs } from "openclaw/plugin-sdk/channel-outbound";
-import { createStartAccountContext } from "openclaw/plugin-sdk/channel-test-helpers";
+import {
+  createPluginRuntimeMock,
+  createStartAccountContext,
+} from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginRuntime } from "../runtime-api.js";
 import { nostrPlugin } from "./channel.js";
 import { nostrOutboundAdapter, startNostrGatewayAccount } from "./gateway.js";
 import { setNostrRuntime } from "./runtime.js";
-import { TEST_RESOLVED_PRIVATE_KEY, buildResolvedNostrAccount } from "./test-fixtures.js";
+import {
+  NOSTR_SANITIZER_CASES,
+  TEST_RESOLVED_PRIVATE_KEY,
+  buildResolvedNostrAccount,
+  createMockNostrBus,
+} from "./test-fixtures.js";
 
 const mocks = vi.hoisted(() => ({
   normalizePubkey: vi.fn((value: string) => `normalized-${value.toLowerCase()}`),
@@ -49,23 +58,21 @@ function installOutboundRuntime(convertMarkdownTables = vi.fn((text: string) => 
 }
 
 async function startOutboundAccount(accountId?: string) {
-  const sendDm = vi.fn(async () => {});
-  const bus = {
-    sendDm,
-    close: vi.fn(),
-    getMetrics: vi.fn(() => ({ counters: {} })),
-    publishProfile: vi.fn(),
-    getProfileState: vi.fn(async () => null),
-  };
+  const bus = createMockNostrBus("a".repeat(64));
+  const { sendDm } = bus;
   mocks.startNostrBus.mockResolvedValueOnce(bus as unknown);
   const abort = new AbortController();
-
-  const task = startNostrGatewayAccount(
-    createStartAccountContext({
-      account: buildResolvedNostrAccount(accountId ? { accountId } : undefined),
-      abortSignal: abort.signal,
-    }),
-  );
+  const context = createStartAccountContext({
+    account: buildResolvedNostrAccount(accountId ? { accountId } : undefined),
+    abortSignal: abort.signal,
+  });
+  context.channelRuntime = {
+    inbound: {
+      ...createPluginRuntimeMock().channel.inbound,
+      buildContext: buildChannelInboundEventContext,
+    },
+  } as never;
+  const task = startNostrGatewayAccount(context);
   await vi.waitFor(() => {
     expect(mocks.startNostrBus).toHaveBeenCalledTimes(1);
   });
@@ -85,9 +92,67 @@ describe("nostr outbound cfg threading", () => {
     mocks.startNostrBus.mockReset();
   });
 
-  it("uses resolved cfg when converting markdown tables before send", async () => {
+  it.each(NOSTR_SANITIZER_CASES)(
+    "$name through the Nostr outbound sanitizer",
+    ({ text, expected }) => {
+      const sanitizeText = nostrPlugin.outbound?.sanitizeText;
+      expect(sanitizeText).toBeTypeOf("function");
+      if (!sanitizeText) {
+        throw new Error("Expected Nostr outbound assistant-visible text sanitizer");
+      }
+      expect(sanitizeText({ text, payload: { text } })).toBe(expected);
+    },
+  );
+
+  it.each([
+    {
+      name: "preserves a short reply as one encrypted message",
+      text: "Hello from Nostr.",
+      expectedChunkCount: 1,
+      joinWith: "",
+    },
+    {
+      name: "splits long replies at word boundaries",
+      text: `${"word ".repeat(1_200)}final`,
+      expectedChunkCount: 2,
+      joinWith: " ",
+    },
+    {
+      name: "preserves newline-delimited reply order",
+      text: `${"line\n".repeat(1_200)}final`,
+      expectedChunkCount: 2,
+      joinWith: "\n",
+    },
+    {
+      name: "hard-splits an uninterrupted oversized reply",
+      text: "x".repeat(8_001),
+      expectedChunkCount: 3,
+      joinWith: "",
+    },
+    {
+      name: "preserves Unicode when an odd prefix shifts the chunk boundary",
+      text: `a${"😀".repeat(2_500)}`,
+      expectedChunkCount: 2,
+      joinWith: "",
+    },
+  ])("$name", ({ text, expectedChunkCount, joinWith }) => {
+    const outbound = nostrPlugin.outbound;
+    const textChunkLimit = outbound?.textChunkLimit;
+    expect(textChunkLimit).toBe(4_000);
+    expect(outbound?.chunker).toBeTypeOf("function");
+    if (!outbound?.chunker || textChunkLimit === undefined) {
+      throw new Error("Expected Nostr outbound text chunking");
+    }
+
+    const chunks = outbound.chunker(text, textChunkLimit);
+    expect(chunks).toHaveLength(expectedChunkCount);
+    expect(chunks.every((chunk) => chunk.length <= textChunkLimit)).toBe(true);
+    expect(chunks.join(joinWith)).toBe(text);
+  });
+
+  it("converts tables before projecting markdown to Nostr plain text", async () => {
     const { resolveMarkdownTableMode, convertMarkdownTables } = installOutboundRuntime(
-      vi.fn((text: string) => `converted:${text}`),
+      vi.fn((text: string) => (text === "***" ? text : "**Table:** [docs](https://example.com)")),
     );
     const { cleanup, sendDm } = await startOutboundAccount();
 
@@ -106,7 +171,19 @@ describe("nostr outbound cfg threading", () => {
     });
     expect(convertMarkdownTables).toHaveBeenCalledWith("|a|b|", "off");
     expect(mocks.normalizePubkey).toHaveBeenCalledWith("NPUB123");
-    expect(sendDm).toHaveBeenCalledWith("normalized-npub123", "converted:|a|b|");
+    expect(sendDm).toHaveBeenCalledWith(
+      "normalized-npub123",
+      "Table: docs (https://example.com)",
+      expect.any(Object),
+    );
+    await expect(
+      nostrOutboundAdapter.sendText({
+        cfg: cfg as OpenClawConfig,
+        to: "NPUB123",
+        text: "***",
+        accountId: "default",
+      }),
+    ).rejects.toThrow("requires non-empty text");
 
     await cleanup.stop();
   });
@@ -135,9 +212,31 @@ describe("nostr outbound cfg threading", () => {
       channel: "nostr",
       accountId: "work",
     });
-    expect(sendDm).toHaveBeenCalledWith("normalized-npub123", "hello");
+    expect(sendDm).toHaveBeenCalledWith("normalized-npub123", "hello", expect.any(Object));
 
     await cleanup.stop();
+  });
+
+  it("returns the relay-confirmed event id in the delivery receipt", async () => {
+    installOutboundRuntime();
+    const { cleanup, sendDm } = await startOutboundAccount();
+    const eventId = "b".repeat(64);
+    sendDm.mockResolvedValueOnce(eventId);
+
+    const result = await nostrOutboundAdapter.sendText({
+      cfg: createCfg() as OpenClawConfig,
+      to: "NPUB123",
+      text: "hello",
+      accountId: "default",
+    });
+
+    expect(result.messageId).toBe(eventId);
+
+    await cleanup.stop();
+  });
+
+  it("recognizes uppercase npub targets", () => {
+    expect(nostrPlugin.messaging?.targetResolver?.looksLikeId?.("NPUB1XYZ123")).toBe(true);
   });
 
   it("backs declared message adapter capabilities with outbound sends", async () => {
@@ -161,7 +260,7 @@ describe("nostr outbound cfg threading", () => {
             text: "hello",
             accountId: "default",
           });
-          expect(sendDm).toHaveBeenCalledWith("normalized-npub123", "hello");
+          expect(sendDm).toHaveBeenCalledWith("normalized-npub123", "hello", expect.any(Object));
           expect(result.receipt.parts[0]?.kind).toBe("text");
         },
         messageSendingHooks: () => {

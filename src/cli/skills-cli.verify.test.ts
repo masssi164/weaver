@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ClawHubSkillVerificationResponse } from "../infra/clawhub-skills.js";
 import { registerSkillsCli } from "./skills-cli.js";
 
 const mocks = vi.hoisted(() => {
@@ -47,6 +48,11 @@ vi.mock("../runtime.js", () => ({
   defaultRuntime: mocks.defaultRuntime,
 }));
 
+vi.mock("./one-shot-exit.js", () => ({
+  exitCliAfterOutput: (runtime: typeof mocks.defaultRuntime, exitCode: number) =>
+    runtime.exit(exitCode),
+}));
+
 vi.mock("../utils.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../utils.js")>()),
   CONFIG_DIR: "/tmp/openclaw-config",
@@ -58,6 +64,7 @@ vi.mock("../config/config.js", () => ({
 }));
 
 vi.mock("../agents/agent-scope.js", () => ({
+  resolveConfiguredAgentId: (_config: unknown, agentId: string) => agentId,
   resolveAgentIdByWorkspacePath: (config: unknown, workspacePath: string) =>
     mocks.resolveAgentIdByWorkspacePathMock(config, workspacePath),
   resolveDefaultAgentId: (config: unknown) => mocks.resolveDefaultAgentIdMock(config),
@@ -65,15 +72,27 @@ vi.mock("../agents/agent-scope.js", () => ({
     mocks.resolveAgentWorkspaceDirMock(config, agentId),
 }));
 
-vi.mock("../infra/clawhub.js", () => ({
-  downloadClawHubSkillArchive: mocks.noopAsync,
+vi.mock("../infra/clawhub-skills.js", () => ({
+  CLAWHUB_SKILLS_SH_REF_PREFIX: "skills-sh:",
+  CLAWHUB_SKILLS_SH_TRUST_LABEL: "Not scanned by ClawHub",
+  CLAWHUB_SKILLS_SH_TRUST_STATE: "not-scanned-by-clawhub",
   fetchClawHubSkillCard: (...args: unknown[]) => mocks.fetchClawHubSkillCardMock(...args),
   fetchClawHubSkillDetail: mocks.noopAsync,
   fetchClawHubSkillVerification: (...args: unknown[]) =>
     mocks.fetchClawHubSkillVerificationMock(...args),
-  resolveClawHubBaseUrl: (baseUrl?: string) => mocks.resolveClawHubBaseUrlMock(baseUrl),
   searchClawHubSkills: mocks.noopAsync,
 }));
+
+vi.mock("../infra/clawhub-artifacts.js", () => ({
+  downloadClawHubSkillArchive: mocks.noopAsync,
+}));
+
+vi.mock("../infra/clawhub-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../infra/clawhub-client.js")>()),
+  resolveClawHubBaseUrl: (baseUrl?: string) => mocks.resolveClawHubBaseUrlMock(baseUrl),
+}));
+
+const { ClawHubRequestError } = await import("../infra/clawhub-client.js");
 
 describe("skills verify CLI", () => {
   let workspaceDir: string;
@@ -109,6 +128,24 @@ describe("skills verify CLI", () => {
       }
       throw error;
     }
+  }
+
+  function mockVerification(overrides: Partial<ClawHubSkillVerificationResponse> = {}) {
+    mocks.fetchClawHubSkillVerificationMock.mockResolvedValueOnce({
+      schema: "clawhub.skill.verify.v1",
+      ok: true,
+      decision: "pass",
+      reasons: [],
+      skill: { slug: "agentreceipt" },
+      publisher: { handle: "openclaw" },
+      version: { version: "1.0.0" },
+      card: { available: true },
+      artifact: { sourceFingerprint: "source-fp" },
+      provenance: null,
+      security: { status: "clean" },
+      signature: { status: "unsigned" },
+      ...overrides,
+    });
   }
 
   async function writeInstalledGeneratedCardSkill() {
@@ -156,27 +193,239 @@ describe("skills verify CLI", () => {
     );
   }
 
-  it("does not reject an installed bundle just because ClawHub generated skill-card.md", async () => {
-    await writeInstalledGeneratedCardSkill();
+  async function writeInstalledSkillsShSkill(
+    requestedReference = "skills-sh:patrick-erichsen/skills/html",
+  ) {
+    const trustState = "not-scanned-by-clawhub";
+    const installedVersion = "a".repeat(40);
+    const skillDir = path.join(workspaceDir, "skills", "html");
+    await fs.mkdir(path.join(skillDir, ".clawhub"), { recursive: true });
+    await fs.writeFile(path.join(skillDir, "SKILL.md"), "# HTML\n", "utf8");
+    await fs.writeFile(
+      path.join(skillDir, ".clawhub", "origin.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          registry: "https://private.example.com/clawhub",
+          slug: "html",
+          requestedReference,
+          trustState,
+          installedVersion,
+          installedAt: 123,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    await fs.mkdir(path.join(workspaceDir, ".clawhub"), { recursive: true });
+    await fs.writeFile(
+      path.join(workspaceDir, ".clawhub", "lock.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          skills: {
+            html: {
+              version: installedVersion,
+              installedAt: 123,
+              registry: "https://private.example.com/clawhub",
+              requestedReference,
+              trustState,
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    return { requestedReference, trustState };
+  }
+
+  function mockUnscannedSkillsShVerification() {
     mocks.fetchClawHubSkillVerificationMock.mockResolvedValueOnce({
       schema: "clawhub.skill.verify.v1",
       ok: true,
-      decision: "pass",
-      reasons: [],
-      skill: { slug: "agentreceipt" },
-      publisher: { handle: "openclaw" },
-      version: { version: "1.2.3" },
+      decision: "unscanned",
+      reasons: ["security.not_scanned_by_clawhub"],
+      skill: { slug: "html" },
+      publisher: { handle: "patrick-erichsen" },
+      version: { version: "a".repeat(40) },
       card: { available: true },
+      artifact: { sourceFingerprint: "source-fp" },
+      provenance: null,
+      security: { status: "not-scanned", passed: false },
+      signature: { status: "unsigned" },
+    });
+  }
+
+  it("verifies an installed skills.sh skill by its exact reference without a version selector", async () => {
+    const { requestedReference, trustState } = await writeInstalledSkillsShSkill();
+    mockUnscannedSkillsShVerification();
+
+    await expect(runCommand(["skills", "verify", requestedReference])).rejects.toThrow(
+      "__exit__:1",
+    );
+
+    expect(mocks.fetchClawHubSkillVerificationMock).toHaveBeenCalledWith({
+      slug: "html",
+      requestedReference,
+      version: undefined,
+      tag: undefined,
+      baseUrl: "https://private.example.com/clawhub",
+    });
+    const payload = JSON.parse(mocks.runtimeStdout.at(-1) ?? "{}") as {
+      openclaw?: { trust?: { state?: string; label?: string } };
+    };
+    expect(payload.openclaw?.trust).toEqual({
+      state: trustState,
+      label: "Not scanned by ClawHub",
+    });
+  });
+
+  it.each([["explicit JSON", ["--json"]]])(
+    "returns machine-readable target errors with %s",
+    async (_label, outputArgs: string[]) => {
+      await writeInstalledSkillsShSkill("skills-sh:owner-a/repo-a/html");
+
+      await expect(
+        runCommand(["skills", "verify", "skills-sh:owner-b/repo-b/html", ...outputArgs]),
+      ).rejects.toThrow("__exit__:1");
+
+      expect(JSON.parse(mocks.runtimeStdout.at(-1) ?? "{}")).toEqual({
+        ok: false,
+        error: {
+          type: "cli_error",
+          message: 'Skill "html" is not tracked from skills-sh:owner-b/repo-b/html.',
+        },
+      });
+      expect(mocks.runtimeErrors).toStrictEqual([]);
+      expect(mocks.fetchClawHubSkillVerificationMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([["implicit JSON", []]])(
+    "returns machine-readable runtime errors with %s",
+    async (_label, outputArgs: string[]) => {
+      mocks.fetchClawHubSkillVerificationMock.mockRejectedValueOnce(
+        new Error("ClawHub verification unavailable"),
+      );
+
+      await expect(
+        runCommand(["skills", "verify", "@demo-owner/weather", ...outputArgs]),
+      ).rejects.toThrow("__exit__:1");
+
+      expect(JSON.parse(mocks.runtimeStdout.at(-1) ?? "{}")).toEqual({
+        ok: false,
+        error: {
+          type: "cli_error",
+          message: "ClawHub verification unavailable",
+        },
+      });
+      expect(mocks.runtimeErrors).toStrictEqual([]);
+    },
+  );
+
+  it.each([
+    { name: "implicit JSON", outputArgs: [], human: false },
+    { name: "human card mode", outputArgs: ["--card"], human: true },
+  ])("maps missing skills to a domain error in $name", async ({ outputArgs, human }) => {
+    const remoteBody = "remote-controlled not-found detail";
+    mocks.fetchClawHubSkillVerificationMock.mockRejectedValueOnce(
+      new ClawHubRequestError({
+        path: "/api/v1/skills/nonexistent-skill-xyz/verify",
+        status: 404,
+        body: remoteBody,
+      }),
+    );
+
+    await expect(
+      runCommand(["skills", "verify", "nonexistent-skill-xyz", ...outputArgs]),
+    ).rejects.toThrow("__exit__:1");
+
+    const message =
+      'Skill "nonexistent-skill-xyz" not found on ClawHub. Run `openclaw skills search nonexistent-skill-xyz` to find the right skill reference.';
+    if (human) {
+      expect(mocks.runtimeStdout).toStrictEqual([]);
+      expect(mocks.runtimeErrors).toStrictEqual([message]);
+    } else {
+      expect(JSON.parse(mocks.runtimeStdout.at(-1) ?? "{}")).toEqual({
+        ok: false,
+        error: { type: "cli_error", message },
+      });
+      expect(mocks.runtimeErrors).toStrictEqual([]);
+    }
+    expect([...mocks.runtimeStdout, ...mocks.runtimeErrors].join("\n")).not.toMatch(
+      /\/api\/v1\/|\(404\)|remote-controlled/u,
+    );
+  });
+
+  it.each([
+    {
+      status: 401,
+      expected:
+        'ClawHub authentication failed while verifying skill "nonexistent-skill-xyz". Authenticate with ClawHub and try again.',
+    },
+    {
+      status: 429,
+      expected:
+        'ClawHub rate limit reached while verifying skill "nonexistent-skill-xyz". Wait and try again later.',
+    },
+    {
+      status: 503,
+      expected:
+        'ClawHub is temporarily unavailable while verifying skill "nonexistent-skill-xyz". Try again later.',
+    },
+  ])("keeps HTTP $status distinct from missing skills", async ({ status, expected }) => {
+    const remoteBody = `remote-controlled ${status} detail`;
+    mocks.fetchClawHubSkillVerificationMock.mockRejectedValueOnce(
+      new ClawHubRequestError({
+        path: "/api/v1/skills/nonexistent-skill-xyz/verify",
+        status,
+        body: remoteBody,
+      }),
+    );
+
+    await expect(runCommand(["skills", "verify", "nonexistent-skill-xyz"])).rejects.toThrow(
+      "__exit__:1",
+    );
+
+    const payload = JSON.parse(mocks.runtimeStdout.at(-1) ?? "{}") as {
+      error?: { message?: string };
+    };
+    expect(payload.error?.message).toBe(expected);
+    expect(payload.error?.message).not.toContain("not found");
+    expect(payload.error?.message).not.toContain(remoteBody);
+    expect(payload.error?.message).not.toContain("/api/v1/");
+  });
+
+  it("verifies an installed skills.sh skill by slug without a version selector", async () => {
+    const { requestedReference } = await writeInstalledSkillsShSkill();
+    mockUnscannedSkillsShVerification();
+
+    await expect(runCommand(["skills", "verify", "html"])).rejects.toThrow("__exit__:1");
+
+    expect(mocks.fetchClawHubSkillVerificationMock).toHaveBeenCalledWith({
+      slug: "html",
+      requestedReference,
+      version: undefined,
+      tag: undefined,
+      baseUrl: "https://private.example.com/clawhub",
+    });
+    expect(mocks.defaultRuntime.exit).toHaveBeenCalledWith(1);
+  });
+
+  it("does not reject an installed bundle just because ClawHub generated skill-card.md", async () => {
+    await writeInstalledGeneratedCardSkill();
+    mockVerification({
+      version: { version: "1.2.3" },
       artifact: {
         sourceFingerprint: "publisher-source-fingerprint-without-generated-card",
         bundleFingerprints: ["generated-bundle-fingerprint-with-skill-card"],
       },
-      provenance: null,
-      security: { status: "clean" },
-      signature: { status: "unsigned" },
     });
 
-    await runCommand(["skills", "verify", "agentreceipt"]);
+    await runCommand(["skills", "verify", "agentreceipt", "--json"]);
 
     expect(mocks.fetchClawHubSkillVerificationMock).toHaveBeenCalledWith({
       slug: "agentreceipt",
@@ -195,19 +444,10 @@ describe("skills verify CLI", () => {
   });
 
   it("verifies owner-qualified registry refs with explicit versions", async () => {
-    mocks.fetchClawHubSkillVerificationMock.mockResolvedValueOnce({
-      schema: "clawhub.skill.verify.v1",
-      ok: true,
-      decision: "pass",
-      reasons: [],
+    mockVerification({
       skill: { slug: "weather" },
       publisher: { handle: "demo-owner" },
       version: { version: "2.0.0" },
-      card: { available: true },
-      artifact: { sourceFingerprint: "source-fp" },
-      provenance: null,
-      security: { status: "clean" },
-      signature: { status: "unsigned" },
     });
 
     await runCommand(["skills", "verify", "@demo-owner/weather", "--version", "2.0.0"]);
@@ -231,11 +471,7 @@ describe("skills verify CLI", () => {
   });
 
   it("prints cards for owner-qualified tag verification", async () => {
-    mocks.fetchClawHubSkillVerificationMock.mockResolvedValueOnce({
-      schema: "clawhub.skill.verify.v1",
-      ok: true,
-      decision: "pass",
-      reasons: [],
+    mockVerification({
       skill: { slug: "weather" },
       publisher: { handle: "demo-owner" },
       version: { version: "2.0.0" },
@@ -243,10 +479,6 @@ describe("skills verify CLI", () => {
         available: true,
         url: "https://cards.example.test/generated/weather.md",
       },
-      artifact: { sourceFingerprint: "source-fp" },
-      provenance: null,
-      security: { status: "clean" },
-      signature: { status: "unsigned" },
     });
     mocks.fetchClawHubSkillCardMock.mockResolvedValueOnce("# Weather\n");
 
@@ -272,16 +504,7 @@ describe("skills verify CLI", () => {
     const sourceUrl = "https://github.com/openclaw/skills/tree/main/agentreceipt";
     const verifiedSourceUrl =
       "https://github.com/openclaw/skills/tree/0123456789abcdef0123456789abcdef01234567/agentreceipt";
-    mocks.fetchClawHubSkillVerificationMock.mockResolvedValueOnce({
-      schema: "clawhub.skill.verify.v1",
-      ok: true,
-      decision: "pass",
-      reasons: [],
-      skill: { slug: "agentreceipt" },
-      publisher: { handle: "openclaw" },
-      version: { version: "1.0.0" },
-      card: { available: true },
-      artifact: { sourceFingerprint: "source-fp" },
+    mockVerification({
       provenance: {
         source: "server-resolved-github-import",
         kind: "github",
@@ -291,8 +514,6 @@ describe("skills verify CLI", () => {
         commit: "0123456789abcdef0123456789abcdef01234567",
         path: "agentreceipt",
       },
-      security: { status: "clean" },
-      signature: { status: "unsigned" },
     });
 
     await runCommand(["skills", "verify", "agentreceipt"]);
@@ -306,22 +527,11 @@ describe("skills verify CLI", () => {
   });
 
   it("does not promote unavailable provenance URLs in verify JSON", async () => {
-    mocks.fetchClawHubSkillVerificationMock.mockResolvedValueOnce({
-      schema: "clawhub.skill.verify.v1",
-      ok: true,
-      decision: "pass",
-      reasons: [],
-      skill: { slug: "agentreceipt" },
-      publisher: { handle: "openclaw" },
-      version: { version: "1.0.0" },
-      card: { available: true },
-      artifact: { sourceFingerprint: "source-fp" },
+    mockVerification({
       provenance: {
         source: "unavailable",
         url: "https://github.com/openclaw/skills/tree/unverified/agentreceipt",
       },
-      security: { status: "clean" },
-      signature: { status: "unsigned" },
     });
 
     await runCommand(["skills", "verify", "agentreceipt"]);

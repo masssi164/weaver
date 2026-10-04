@@ -1,12 +1,12 @@
 // Diffs tests cover tool render output plugin behavior.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpenClawPluginApi } from "../api.js";
-import type { DiffScreenshotter } from "./browser.js";
-import { DEFAULT_DIFFS_TOOL_DEFAULTS } from "./config.js";
+import type { DiffScreenshotter } from "./browser.runtime.js";
+import { resolveDiffsPluginDefaults } from "./config.js";
 import { createDiffStoreHarness } from "./test-helpers.js";
+
+const DEFAULT_DIFFS_TOOL_DEFAULTS = resolveDiffsPluginDefaults(undefined);
 
 const { renderDiffDocumentMock } = vi.hoisted(() => ({
   renderDiffDocumentMock: vi.fn(),
@@ -49,17 +49,20 @@ describe("diffs tool rendered output guards", () => {
       imageHtml: "",
     });
 
-    const screenshotter = createPngScreenshotter({
-      assertHtml: (html) => {
+    const screenshotHtml = vi.fn<DiffScreenshotter["screenshotHtml"]>(
+      async ({ html, outputPath }) => {
         expect(html).toBe("");
+        await fs.mkdir(path.dirname(outputPath), { recursive: true });
+        await fs.writeFile(outputPath, Buffer.from("png"));
+        return outputPath;
       },
-    });
+    );
 
     const tool = createDiffsTool({
-      api: createApi(),
+      getConfig: () => ({}),
       store,
       defaults: DEFAULT_DIFFS_TOOL_DEFAULTS,
-      screenshotter,
+      screenshotter: { screenshotHtml },
     });
 
     const result = await tool.execute?.("tool-empty-image-html", {
@@ -68,41 +71,7 @@ describe("diffs tool rendered output guards", () => {
       mode: "file",
     });
 
-    expect(screenshotter["screenshotHtml"]).toHaveBeenCalledTimes(1);
+    expect(screenshotHtml).toHaveBeenCalledTimes(1);
     expect((result.details as Record<string, unknown>).filePath).toMatch(/preview\.png$/);
   });
 });
-
-function createApi(): OpenClawPluginApi {
-  return createTestPluginApi({
-    id: "diffs",
-    name: "Diffs",
-    description: "Diffs",
-    source: "test",
-    config: {
-      gateway: {
-        port: 18789,
-        bind: "loopback",
-      },
-    },
-    runtime: {} as OpenClawPluginApi["runtime"],
-  });
-}
-
-function createPngScreenshotter(
-  params: {
-    assertHtml?: (html: string) => void;
-  } = {},
-): DiffScreenshotter {
-  const screenshotHtml: DiffScreenshotter["screenshotHtml"] = vi.fn(
-    async ({ html, outputPath }: { html: string; outputPath: string }) => {
-      params.assertHtml?.(html);
-      await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await fs.writeFile(outputPath, Buffer.from("png"));
-      return outputPath;
-    },
-  );
-  return {
-    screenshotHtml,
-  };
-}

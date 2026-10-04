@@ -3,6 +3,7 @@ type RunStateStatusPatch = {
   busy?: boolean;
   activeRuns?: number;
   lastRunActivityAt?: number | null;
+  activeRunStartedAt?: number | null;
 };
 
 /** Status sink used by channel run-state updates. */
@@ -61,16 +62,13 @@ export function createRunStateMachine(params: RunStateMachineParams) {
   const deactivate = () => {
     lifecycleActive = false;
     clearHeartbeat();
-  };
-
-  const onAbort = () => {
-    deactivate();
+    params.abortSignal?.removeEventListener("abort", deactivate);
   };
 
   if (params.abortSignal?.aborted) {
-    onAbort();
+    deactivate();
   } else {
-    params.abortSignal?.addEventListener("abort", onAbort, { once: true });
+    params.abortSignal?.addEventListener("abort", deactivate, { once: true });
   }
 
   if (lifecycleActive) {

@@ -31,10 +31,6 @@ function resolveLegacyGroupSessionKey(ctx: MsgContext): GroupKeyResolution | nul
   return null;
 }
 
-function normalizeGroupLabel(raw?: string) {
-  return normalizeHyphenSlug(raw);
-}
-
 function joinOpaqueTail(parts: string[], start: number): string | null {
   return normalizeOptionalString(parts[start]) ? parts.slice(start).join(":") : null;
 }
@@ -60,10 +56,7 @@ function resolveOriginatingGroupTargetId(params: {
   if (secondIsKind && (head === params.provider || getGroupSurfaces().has(head))) {
     return joinOpaqueTail(parts, 2);
   }
-  if (head === params.provider || head === "chat" || head === "room" || head === "group") {
-    return joinOpaqueTail(parts, 1);
-  }
-  if (head === "channel") {
+  if (head === params.provider || ["chat", "room", "group", "channel"].includes(head)) {
     return joinOpaqueTail(parts, 1);
   }
   return null;
@@ -71,19 +64,42 @@ function resolveOriginatingGroupTargetId(params: {
 
 function shortenGroupId(value?: string) {
   const trimmed = normalizeOptionalString(value) ?? "";
-  if (!trimmed) {
-    return "";
-  }
   if (trimmed.length <= 14) {
     return trimmed;
   }
   return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
 }
 
+/**
+ * Builds a human-readable group/channel title from stored chat metadata.
+ * Prefers the native channel name (#general) or the chat subject verbatim;
+ * returns undefined when only opaque route ids are available so callers can
+ * fall back to the compact token form below.
+ */
+export function buildGroupDisplayTitle(params: {
+  subject?: string;
+  topicName?: string;
+  groupChannel?: string;
+  space?: string;
+}): string | undefined {
+  const subject = normalizeOptionalString(params.subject);
+  const groupChannel = normalizeOptionalString(params.groupChannel);
+  const space = normalizeOptionalString(params.space);
+  if (groupChannel) {
+    const channelLabel = groupChannel.startsWith("#") ? groupChannel : `#${groupChannel}`;
+    return space ? `${space} ${channelLabel}` : channelLabel;
+  }
+  return (
+    [subject ?? space, normalizeOptionalString(params.topicName)].filter(Boolean).join(" / ") ||
+    undefined
+  );
+}
+
 /** Builds a compact display label for group sessions from channel metadata or ids. */
 export function buildGroupDisplayName(params: {
   provider?: string;
   subject?: string;
+  topicName?: string;
   groupChannel?: string;
   space?: string;
   id?: string;
@@ -92,17 +108,17 @@ export function buildGroupDisplayName(params: {
   const providerKey = normalizeOptionalLowercaseString(params.provider) ?? "group";
   const groupChannel = normalizeOptionalString(params.groupChannel);
   const space = normalizeOptionalString(params.space);
-  const subject = normalizeOptionalString(params.subject);
+  const subject = buildGroupDisplayTitle({ subject: params.subject, topicName: params.topicName });
   const detail =
     (groupChannel && space
       ? `${space}${groupChannel.startsWith("#") ? "" : "#"}${groupChannel}`
       : groupChannel || subject || space || "") || "";
   const fallbackId = normalizeOptionalString(params.id) ?? params.key;
   const rawLabel = detail || fallbackId;
-  let token = normalizeGroupLabel(rawLabel);
+  let token = normalizeHyphenSlug(rawLabel);
   // Very long opaque ids become a readable stable token instead of leaking full route ids into UI.
   if (!token) {
-    token = normalizeGroupLabel(shortenGroupId(rawLabel));
+    token = normalizeHyphenSlug(shortenGroupId(rawLabel));
   }
   if (!params.groupChannel && token.startsWith("#")) {
     token = token.replace(/^#+/, "");

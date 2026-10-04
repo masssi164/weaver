@@ -1,5 +1,4 @@
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
-// Exa provider module implements model/runtime integration.
 import type { WebSearchProviderPlugin } from "openclaw/plugin-sdk/provider-web-search-contract";
 import { createExaWebSearchProviderBase } from "./exa-web-search-provider.shared.js";
 
@@ -67,9 +66,10 @@ export function createExaWebSearchProvider(): WebSearchProviderPlugin {
       description:
         "Search the web using Exa AI. Supports neural or keyword search, publication date filters, and optional highlights or text extraction.",
       parameters: ExaSearchSchema,
-      execute: async (args) => {
+      execute: async (args, context) => {
+        context?.signal?.throwIfAborted();
         const { executeExaWebSearchProviderTool } = await loadExaWebSearchRuntime();
-        return await executeExaWebSearchProviderTool(ctx, args);
+        return await executeExaWebSearchProviderTool(ctx, args, context?.signal);
       },
     }),
   };

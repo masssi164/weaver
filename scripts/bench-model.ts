@@ -1,7 +1,8 @@
 // Bench Model script supports OpenClaw repository automation.
 import { pathToFileURL } from "node:url";
-import { completeSimple, type Model } from "openclaw/plugin-sdk/llm";
-import { parseStrictIntegerOption } from "./lib/dev-tooling-safety.ts";
+import type { Model } from "openclaw/plugin-sdk/llm";
+import { expectDefined } from "../packages/normalization-core/src/expect.js";
+import { parseStrictIntegerOption } from "./lib/strict-integer-option.ts";
 
 type Usage = {
   input?: number;
@@ -24,8 +25,6 @@ type CliOptions = {
 
 const DEFAULT_PROMPT = "Reply with a single word: ok. No punctuation or extra text.";
 const DEFAULT_RUNS = 10;
-const BOOLEAN_FLAGS = new Set(["--help", "-h"]);
-const VALUE_FLAGS = new Set(["--prompt", "--runs"]);
 
 class CliArgumentError extends Error {
   override name = "CliArgumentError";
@@ -39,49 +38,34 @@ function readValue(argv: string[], index: number, flag: string): string {
   return value;
 }
 
-function validateCliArgs(argv: string[]): void {
-  const seenValueFlags = new Set<string>();
+function parseArgs(argv = process.argv.slice(2)): CliOptions {
+  let help = false;
+  const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index] ?? "";
-    if (BOOLEAN_FLAGS.has(arg)) {
+    if (arg === "--help" || arg === "-h") {
+      help = true;
       continue;
     }
-    if (VALUE_FLAGS.has(arg)) {
-      if (seenValueFlags.has(arg)) {
+    if (arg === "--prompt" || arg === "--runs") {
+      if (values.has(arg)) {
         throw new CliArgumentError(`${arg} was provided more than once`);
       }
-      seenValueFlags.add(arg);
-      readValue(argv, index, arg);
+      values.set(arg, readValue(argv, index, arg));
       index += 1;
       continue;
     }
     throw new CliArgumentError(`Unknown argument: ${arg}`);
   }
-}
-
-function parseArg(argv: string[], flag: string): string | undefined {
-  const index = argv.indexOf(flag);
-  if (index === -1) {
-    return undefined;
-  }
-  return readValue(argv, index, flag);
-}
-
-function parseRuns(raw: string | undefined): number {
-  return parseStrictIntegerOption({
-    fallback: DEFAULT_RUNS,
-    label: "--runs",
-    min: 1,
-    raw,
-  });
-}
-
-function parseArgs(argv = process.argv.slice(2)): CliOptions {
-  validateCliArgs(argv);
   return {
-    help: argv.includes("--help") || argv.includes("-h"),
-    prompt: parseArg(argv, "--prompt") ?? DEFAULT_PROMPT,
-    runs: parseRuns(parseArg(argv, "--runs")),
+    help,
+    prompt: values.get("--prompt") ?? DEFAULT_PROMPT,
+    runs: parseStrictIntegerOption({
+      fallback: DEFAULT_RUNS,
+      label: "--runs",
+      min: 1,
+      raw: values.get("--runs"),
+    }),
   };
 }
 
@@ -108,12 +92,16 @@ function median(values: number[]): number {
   if (values.length === 0) {
     return 0;
   }
-  const sorted = [...values].toSorted((a, b) => a - b);
+  const sorted = values.toSorted((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   if (sorted.length % 2 === 0) {
-    return Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    return Math.round(
+      (expectDefined(sorted[mid - 1], "lower middle model benchmark sample") +
+        expectDefined(sorted[mid], "upper middle model benchmark sample")) /
+        2,
+    );
   }
-  return sorted[mid];
+  return expectDefined(sorted[mid], "middle model benchmark sample");
 }
 
 async function runModel(opts: {
@@ -123,6 +111,8 @@ async function runModel(opts: {
   runs: number;
   prompt: string;
 }): Promise<RunResult[]> {
+  // Keep SDK initialization outside the measured model-call samples.
+  const { completeSimple } = await import("openclaw/plugin-sdk/llm");
   const results: RunResult[] = [];
   for (let i = 0; i < opts.runs; i += 1) {
     const started = Date.now();
@@ -182,6 +172,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     name: "Claude Opus 4.6",
     api: "anthropic-messages",
     provider: "anthropic",
+    baseUrl: "https://api.anthropic.com",
     reasoning: true,
     input: ["text", "image"],
     cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
@@ -225,10 +216,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 }
 
 export const testing = {
-  median,
   parseArgs,
-  parseRuns,
-  validateCliArgs,
 };
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

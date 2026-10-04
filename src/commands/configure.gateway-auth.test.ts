@@ -1,6 +1,7 @@
 // Configure gateway auth tests cover gateway auth config generation and token handling.
 import { describe, expect, it } from "vitest";
-import { buildGatewayAuthConfig } from "./configure.js";
+import type { GatewayAuthConfig } from "../config/config.js";
+import { buildGatewayAuthConfig } from "./configure.gateway-auth.js";
 
 function expectGeneratedTokenFromInput(
   token: string | undefined,
@@ -22,47 +23,45 @@ function expectGeneratedTokenFromInput(
 }
 
 describe("buildGatewayAuthConfig", () => {
-  it("preserves allowTailscale when switching to token", () => {
-    const result = buildGatewayAuthConfig({
-      existing: {
-        mode: "password",
-        password: "secret", // pragma: allowlist secret
-        allowTailscale: true,
-      },
-      mode: "token",
-      token: "abc",
-    });
-
-    expect(result).toEqual({ mode: "token", token: "abc", allowTailscale: true });
-  });
-
-  it("drops password when switching to token", () => {
-    const result = buildGatewayAuthConfig({
-      existing: {
-        mode: "password",
-        password: "secret", // pragma: allowlist secret
+  it.each(["token", "password", "trusted-proxy"] as const)(
+    "preserves unrelated policy and replaces mode-owned fields for %s",
+    (mode) => {
+      const modeFields = {
+        token: { token: "selected-token" },
+        password: { password: "selected-password" },
+        "trusted-proxy": { trustedProxy: { userHeader: "x-forwarded-user" } },
+      };
+      const policy: GatewayAuthConfig = {
         allowTailscale: false,
-      },
-      mode: "token",
-      token: "abc",
-    });
+        rateLimit: {
+          maxAttempts: 3,
+          windowMs: 20_000,
+          lockoutMs: 90_000,
+          exemptLoopback: false,
+        },
+        identityScopes: { "operator@example.test": ["operator.read", "operator.write"] },
+      };
+      const existing: GatewayAuthConfig = {
+        ...policy,
+        mode: "password",
+        token: { source: "env", provider: "default", id: "OLD_TOKEN" },
+        password: "old-password",
+        trustedProxy: {
+          userHeader: "x-old-user",
+          requiredHeaders: ["x-old-required"],
+          allowUsers: ["old@example.test"],
+        },
+      };
+      const original = structuredClone(existing);
 
-    expect(result).toEqual({
-      mode: "token",
-      token: "abc",
-      allowTailscale: false,
-    });
-  });
-
-  it("drops token when switching to password", () => {
-    const result = buildGatewayAuthConfig({
-      existing: { mode: "token", token: "abc" },
-      mode: "password",
-      password: "secret", // pragma: allowlist secret
-    });
-
-    expect(result).toEqual({ mode: "password", password: "secret" }); // pragma: allowlist secret
-  });
+      expect(buildGatewayAuthConfig({ existing, mode, ...modeFields[mode] })).toEqual({
+        ...policy,
+        mode,
+        ...modeFields[mode],
+      });
+      expect(existing).toEqual(original);
+    },
+  );
 
   it("does not silently omit password when literal string is provided", () => {
     const result = buildGatewayAuthConfig({
@@ -145,44 +144,6 @@ describe("buildGatewayAuthConfig", () => {
     });
   });
 
-  it("builds trusted-proxy config with only userHeader", () => {
-    const result = buildGatewayAuthConfig({
-      mode: "trusted-proxy",
-      trustedProxy: {
-        userHeader: "x-remote-user",
-      },
-    });
-
-    expect(result).toEqual({
-      mode: "trusted-proxy",
-      trustedProxy: {
-        userHeader: "x-remote-user",
-      },
-    });
-  });
-
-  it("preserves allowTailscale when switching to trusted-proxy", () => {
-    const result = buildGatewayAuthConfig({
-      existing: {
-        mode: "token",
-        token: "abc",
-        allowTailscale: true,
-      },
-      mode: "trusted-proxy",
-      trustedProxy: {
-        userHeader: "x-forwarded-user",
-      },
-    });
-
-    expect(result).toEqual({
-      mode: "trusted-proxy",
-      allowTailscale: true,
-      trustedProxy: {
-        userHeader: "x-forwarded-user",
-      },
-    });
-  });
-
   it("throws error when trusted-proxy mode lacks trustedProxy config", () => {
     expect(() => {
       buildGatewayAuthConfig({
@@ -190,28 +151,5 @@ describe("buildGatewayAuthConfig", () => {
         // missing trustedProxy
       });
     }).toThrow("trustedProxy config is required when mode is trusted-proxy");
-  });
-
-  it("drops token and password when switching to trusted-proxy", () => {
-    const result = buildGatewayAuthConfig({
-      existing: {
-        mode: "token",
-        token: "abc",
-        password: "secret", // pragma: allowlist secret
-      },
-      mode: "trusted-proxy",
-      trustedProxy: {
-        userHeader: "x-forwarded-user",
-      },
-    });
-
-    expect(result).toEqual({
-      mode: "trusted-proxy",
-      trustedProxy: {
-        userHeader: "x-forwarded-user",
-      },
-    });
-    expect(result).not.toHaveProperty("token");
-    expect(result).not.toHaveProperty("password");
   });
 });

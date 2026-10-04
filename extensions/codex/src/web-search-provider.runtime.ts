@@ -7,10 +7,14 @@ import {
 } from "openclaw/plugin-sdk/provider-web-search";
 import type { WebSearchProviderPlugin } from "openclaw/plugin-sdk/provider-web-search-contract";
 import {
+  normalizeOptionalString,
+  normalizeTrimmedStringList,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
   runBoundedCodexAppServerTurn,
   type CodexBoundedTurnOptions,
 } from "./app-server/bounded-turn.js";
-import { isJsonObject, type CodexThreadItem, type JsonObject } from "./app-server/protocol.js";
+import { isJsonObject, type CodexThreadItem } from "./app-server/protocol.js";
 import { buildCodexNativeWebSearchThreadConfig } from "./app-server/web-search.js";
 
 type WebSearchProviderContext = Parameters<WebSearchProviderPlugin["createTool"]>[0];
@@ -26,8 +30,10 @@ export async function executeCodexWebSearchProviderTool(
   const result = await runBoundedCodexAppServerTurn({
     config: ctx.config,
     model: { mode: "live-default" },
+    modelProvider: "openai",
     timeoutMs: resolveSearchTimeoutSeconds(ctx.searchConfig as SearchConfigRecord) * 1_000,
     signal: executionContext?.signal,
+    assertCurrent: executionContext?.assertCurrent,
     agentDir: ctx.agentDir,
     options,
     taskLabel: "hosted search",
@@ -62,14 +68,14 @@ export async function executeCodexWebSearchProviderTool(
 
 function summarizeCodexWebSearchItem(item: CodexThreadItem): Record<string, unknown> {
   const action = isJsonObject(item.action) ? item.action : undefined;
-  const actionType = readNonEmptyString(action, "type");
-  const queries = actionType === "search" ? readNonEmptyStringArray(action, "queries") : [];
+  const actionType = normalizeOptionalString(action?.type);
+  const queries = actionType === "search" ? normalizeTrimmedStringList(action?.queries) : [];
   const query =
-    normalizeNonEmptyString(item.query) ??
-    (actionType === "search" ? readNonEmptyString(action, "query") : undefined) ??
+    normalizeOptionalString(item.query) ??
+    (actionType === "search" ? normalizeOptionalString(action?.query) : undefined) ??
     queries[0];
-  const url = readNonEmptyString(action, "url");
-  const pattern = readNonEmptyString(action, "pattern");
+  const url = normalizeOptionalString(action?.url);
+  const pattern = normalizeOptionalString(action?.pattern);
   return {
     ...(query ? { query } : {}),
     ...(queries.length > 0 ? { queries } : {}),
@@ -77,23 +83,4 @@ function summarizeCodexWebSearchItem(item: CodexThreadItem): Record<string, unkn
     ...(url ? { url } : {}),
     ...(pattern ? { pattern } : {}),
   };
-}
-
-function readNonEmptyString(record: JsonObject | undefined, key: string): string | undefined {
-  return record ? normalizeNonEmptyString(record[key]) : undefined;
-}
-
-function readNonEmptyStringArray(record: JsonObject | undefined, key: string): string[] {
-  const value = record?.[key];
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((entry) => {
-    const normalized = normalizeNonEmptyString(entry);
-    return normalized ? [normalized] : [];
-  });
-}
-
-function normalizeNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" ? value.trim() || undefined : undefined;
 }

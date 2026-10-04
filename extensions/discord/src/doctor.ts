@@ -1,13 +1,18 @@
-// Discord plugin module implements doctor behavior.
 import type { ChannelDoctorAdapter } from "openclaw/plugin-sdk/channel-contract";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { collectProviderDangerousNameMatchingScopes } from "openclaw/plugin-sdk/runtime-doctor";
+import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
+import {
+  asObjectRecord,
+  collectChannelAccountScopes,
+  collectProviderDangerousNameMatchingScopes,
+} from "openclaw/plugin-sdk/runtime-doctor-migrations";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { inspectDiscordAccount } from "./account-inspect.js";
 import { resolveDefaultDiscordAccountId } from "./accounts.js";
 import { normalizeCompatibilityConfig as normalizeDiscordCompatibilityConfig } from "./doctor-contract.js";
 import { DISCORD_LEGACY_CONFIG_RULES } from "./doctor-shared.js";
 import { isDiscordMutableAllowEntry } from "./security-doctor.js";
+import { discordVoiceTranscriptsSourceProvider } from "./voice/transcripts-source.js";
 
 type DiscordNumericIdHit = { path: string; entry: number; safe: boolean };
 
@@ -17,42 +22,14 @@ type DiscordIdListRef = {
   key: string;
 };
 
-function asObjectRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 function sanitizeForLog(value: string): string {
   return value.replace(/\p{Cc}+/gu, " ").trim();
-}
-
-function collectDiscordAccountScopes(
-  cfg: OpenClawConfig,
-): Array<{ prefix: string; account: Record<string, unknown> }> {
-  const scopes: Array<{ prefix: string; account: Record<string, unknown> }> = [];
-  const discord = asObjectRecord(cfg.channels?.discord);
-  if (!discord) {
-    return scopes;
-  }
-
-  scopes.push({ prefix: "channels.discord", account: discord });
-  const accounts = asObjectRecord(discord.accounts);
-  if (!accounts) {
-    return scopes;
-  }
-  for (const key of Object.keys(accounts)) {
-    const account = asObjectRecord(accounts[key]);
-    if (account) {
-      scopes.push({ prefix: `channels.discord.accounts.${key}`, account });
-    }
-  }
-  return scopes;
 }
 
 function collectDiscordIdLists(
   prefix: string,
   account: Record<string, unknown>,
+  userAllowlistsOnly = false,
 ): DiscordIdListRef[] {
   const refs: DiscordIdListRef[] = [
     { pathLabel: `${prefix}.allowFrom`, holder: account, key: "allowFrom" },
@@ -60,10 +37,12 @@ function collectDiscordIdLists(
   const dm = asObjectRecord(account.dm);
   if (dm) {
     refs.push({ pathLabel: `${prefix}.dm.allowFrom`, holder: dm, key: "allowFrom" });
-    refs.push({ pathLabel: `${prefix}.dm.groupChannels`, holder: dm, key: "groupChannels" });
+    if (!userAllowlistsOnly) {
+      refs.push({ pathLabel: `${prefix}.dm.groupChannels`, holder: dm, key: "groupChannels" });
+    }
   }
   const execApprovals = asObjectRecord(account.execApprovals);
-  if (execApprovals) {
+  if (execApprovals && !userAllowlistsOnly) {
     refs.push({
       pathLabel: `${prefix}.execApprovals.approvers`,
       holder: execApprovals,
@@ -80,7 +59,9 @@ function collectDiscordIdLists(
       continue;
     }
     refs.push({ pathLabel: `${prefix}.guilds.${guildId}.users`, holder: guild, key: "users" });
-    refs.push({ pathLabel: `${prefix}.guilds.${guildId}.roles`, holder: guild, key: "roles" });
+    if (!userAllowlistsOnly) {
+      refs.push({ pathLabel: `${prefix}.guilds.${guildId}.roles`, holder: guild, key: "roles" });
+    }
     const channels = asObjectRecord(guild.channels);
     if (!channels) {
       continue;
@@ -95,11 +76,13 @@ function collectDiscordIdLists(
         holder: channel,
         key: "users",
       });
-      refs.push({
-        pathLabel: `${prefix}.guilds.${guildId}.channels.${channelId}.roles`,
-        holder: channel,
-        key: "roles",
-      });
+      if (!userAllowlistsOnly) {
+        refs.push({
+          pathLabel: `${prefix}.guilds.${guildId}.channels.${channelId}.roles`,
+          holder: channel,
+          key: "roles",
+        });
+      }
     }
   }
   return refs;
@@ -123,7 +106,7 @@ export function scanDiscordNumericIdEntries(cfg: OpenClawConfig): DiscordNumeric
     }
   };
 
-  for (const scope of collectDiscordAccountScopes(cfg)) {
+  for (const scope of collectChannelAccountScopes({ cfg, channelId: "discord" })) {
     for (const ref of collectDiscordIdLists(scope.prefix, scope.account)) {
       scanList(ref.pathLabel, ref.holder[ref.key]);
     }
@@ -161,14 +144,14 @@ export function collectDiscordNumericIdWarnings(params: {
 
   const lines: string[] = [];
   if (repairableHits.length > 0) {
-    const sample = repairableHits[0];
+    const sample = expectDefined(repairableHits.at(0), "non-empty repairable Discord ID hits");
     lines.push(
       `- Discord allowlists contain ${repairableHits.length} numeric ${repairableHits.length === 1 ? "entry" : "entries"} (e.g. ${sanitizeForLog(sample.path)}=${sanitizeForLog(String(sample.entry))}).`,
       `- Discord IDs must be strings; run "${params.doctorFixCommand}" to convert numeric IDs to quoted strings.`,
     );
   }
   if (blockedHits.length > 0) {
-    const sample = blockedHits[0];
+    const sample = expectDefined(blockedHits.at(0), "non-empty blocked Discord ID hits");
     lines.push(
       `- Discord allowlists contain ${blockedHits.length} numeric ${blockedHits.length === 1 ? "entry" : "entries"} in lists that cannot be auto-repaired (e.g. ${sanitizeForLog(sample.path)}).`,
       `- These lists include invalid or precision-losing numeric IDs; manually quote the original values in your config file, then rerun "${params.doctorFixCommand}".`,
@@ -215,7 +198,7 @@ export function maybeRepairDiscordNumericIds(
     }
   };
 
-  for (const scope of collectDiscordAccountScopes(next)) {
+  for (const scope of collectChannelAccountScopes({ cfg: next, channelId: "discord" })) {
     for (const ref of collectDiscordIdLists(scope.prefix, scope.account)) {
       repairList(ref.pathLabel, ref.holder, ref.key);
     }
@@ -258,6 +241,38 @@ export function collectDiscordMissingEnvTokenWarnings(params: {
   ];
 }
 
+function collectDiscordTranscriptsAutoStartWarnings(cfg: OpenClawConfig): string[] {
+  if (cfg.transcripts?.enabled === false || !Array.isArray(cfg.transcripts?.autoStart)) {
+    return [];
+  }
+  const ownership = discordVoiceTranscriptsSourceProvider.accessControl;
+  if (!ownership) {
+    return [];
+  }
+
+  return cfg.transcripts.autoStart.flatMap((entry, index) => {
+    const providerId = normalizeOptionalString(entry.providerId)?.toLowerCase();
+    if (
+      (providerId !== discordVoiceTranscriptsSourceProvider.id &&
+        !discordVoiceTranscriptsSourceProvider.aliases?.includes(providerId ?? "")) ||
+      normalizeOptionalString(entry.accountId)
+    ) {
+      return [];
+    }
+    const resolution = ownership.resolveAccountId({
+      cfg,
+      source: { providerId: entry.providerId, accountId: entry.accountId },
+    });
+    if (resolution.ok) {
+      return [];
+    }
+    const path = `transcripts.autoStart[${index}]`;
+    return [
+      `- ${path} cannot select a Discord voice account: ${resolution.error} Set ${path}.accountId to the intended enabled voice account, or set channels.discord.defaultAccount when one account should be the global default.`,
+    ];
+  });
+}
+
 function collectDiscordMutableAllowlistWarnings(cfg: OpenClawConfig): string[] {
   const hits: Array<{ path: string; entry: string }> = [];
   const addHits = (pathLabel: string, list: unknown) => {
@@ -277,31 +292,8 @@ function collectDiscordMutableAllowlistWarnings(cfg: OpenClawConfig): string[] {
     if (scope.dangerousNameMatchingEnabled) {
       continue;
     }
-    addHits(`${scope.prefix}.allowFrom`, scope.account.allowFrom);
-    const dm = asObjectRecord(scope.account.dm);
-    if (dm) {
-      addHits(`${scope.prefix}.dm.allowFrom`, dm.allowFrom);
-    }
-    const guilds = asObjectRecord(scope.account.guilds);
-    if (!guilds) {
-      continue;
-    }
-    for (const [guildId, guildRaw] of Object.entries(guilds)) {
-      const guild = asObjectRecord(guildRaw);
-      if (!guild) {
-        continue;
-      }
-      addHits(`${scope.prefix}.guilds.${guildId}.users`, guild.users);
-      const channels = asObjectRecord(guild.channels);
-      if (!channels) {
-        continue;
-      }
-      for (const [channelId, channelRaw] of Object.entries(channels)) {
-        const channel = asObjectRecord(channelRaw);
-        if (channel) {
-          addHits(`${scope.prefix}.guilds.${guildId}.channels.${channelId}.users`, channel.users);
-        }
-      }
+    for (const ref of collectDiscordIdLists(scope.prefix, scope.account, true)) {
+      addHits(ref.pathLabel, ref.holder[ref.key]);
     }
   }
 
@@ -335,6 +327,7 @@ export const discordDoctor: ChannelDoctorAdapter = {
       hits: scanDiscordNumericIdEntries(cfg),
       doctorFixCommand,
     }),
+    ...collectDiscordTranscriptsAutoStartWarnings(cfg),
   ],
   collectMutableAllowlistWarnings: ({ cfg }) => collectDiscordMutableAllowlistWarnings(cfg),
   repairConfig: ({ cfg, doctorFixCommand }) => maybeRepairDiscordNumericIds(cfg, doctorFixCommand),

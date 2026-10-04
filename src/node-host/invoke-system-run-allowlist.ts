@@ -1,11 +1,12 @@
+import { expectDefined } from "@openclaw/normalization-core";
 /** Resolves system.run allowlist matches, argv plans, and truncated command output. */
 import {
   analyzeArgvCommand,
   evaluateExecAllowlist,
   evaluateShellAllowlistWithAuthorization,
   resolvePlannedSegmentArgv,
-  resolveExecApprovals,
   type ExecAllowlistEntry,
+  type ExecApprovalsResolved,
   type ExecCommandSegment,
   type ExecSegmentSatisfiedBy,
   type ExecSecurity,
@@ -16,6 +17,7 @@ import { buildAuthorizedShellCommandFromPlan } from "../infra/exec-authorization
 import { resolveExecSafeBinRuntimePolicy } from "../infra/exec-safe-bin-runtime-policy.js";
 import {
   normalizeExecutableToken,
+  POSIX_PARSEABLE_SHELL_WRAPPERS,
   POSIX_SHELL_WRAPPERS,
   resolveShellWrapperTransportArgv,
 } from "../infra/exec-wrapper-resolution.js";
@@ -31,12 +33,11 @@ import type { RunResult } from "./invoke-types.js";
  * This module keeps command approval analysis separate from process execution,
  * and only rewrites shell transports when the rebuilt command still satisfies policy.
  */
-const POSIX_SHELL_WRAPPER_NAMES: ReadonlySet<string> = POSIX_SHELL_WRAPPERS;
-
 type SystemRunAllowlistAnalysis = {
   analysisOk: boolean;
   allowlistMatches: ExecAllowlistEntry[];
   allowlistSatisfied: boolean;
+  allowlistAuthorizationSatisfied: boolean;
   segments: ExecCommandSegment[];
   segmentAllowlistEntries: Array<ExecAllowlistEntry | null>;
   segmentSatisfiedBy: ExecSegmentSatisfiedBy[];
@@ -47,7 +48,7 @@ type SystemRunAllowlistAnalysis = {
 export async function evaluateSystemRunAllowlist(params: {
   shellCommand: string | null;
   argv: string[];
-  approvals: ReturnType<typeof resolveExecApprovals>;
+  approvals: ExecApprovalsResolved;
   security: ExecSecurity;
   safeBins: ReturnType<typeof resolveExecSafeBinRuntimePolicy>["safeBins"];
   safeBinProfiles: ReturnType<typeof resolveExecSafeBinRuntimePolicy>["safeBinProfiles"];
@@ -77,6 +78,7 @@ export async function evaluateSystemRunAllowlist(params: {
         params.security === "allowlist" && allowlistEval.analysisOk
           ? allowlistEval.allowlistSatisfied
           : false,
+      allowlistAuthorizationSatisfied: allowlistEval.analysisOk && allowlistEval.allowlistSatisfied,
       segments: allowlistEval.segments,
       segmentAllowlistEntries: allowlistEval.segmentAllowlistEntries,
       segmentSatisfiedBy: allowlistEval.segmentSatisfiedBy,
@@ -102,6 +104,7 @@ export async function evaluateSystemRunAllowlist(params: {
     allowlistMatches: allowlistEval.allowlistMatches,
     allowlistSatisfied:
       params.security === "allowlist" && analysis.ok ? allowlistEval.allowlistSatisfied : false,
+    allowlistAuthorizationSatisfied: analysis.ok && allowlistEval.allowlistSatisfied,
     segments: analysis.segments,
     segmentAllowlistEntries: allowlistEval.segmentAllowlistEntries,
     segmentSatisfiedBy: allowlistEval.segmentSatisfiedBy,
@@ -129,7 +132,9 @@ export function resolvePlannedAllowlistArgv(params: {
   ) {
     return undefined;
   }
-  const plannedAllowlistArgv = resolvePlannedSegmentArgv(params.segments[0]);
+  const plannedAllowlistArgv = resolvePlannedSegmentArgv(
+    expectDefined(params.segments[0], "segments entry at 0"),
+  );
   return plannedAllowlistArgv && plannedAllowlistArgv.length > 0 ? plannedAllowlistArgv : null;
 }
 
@@ -138,12 +143,6 @@ export async function resolveSystemRunExecArgv(params: {
   plannedAllowlistArgv: string[] | undefined;
   argv: string[];
   security: ExecSecurity;
-  approvals: ReturnType<typeof resolveExecApprovals>;
-  safeBins: ReturnType<typeof resolveExecSafeBinRuntimePolicy>["safeBins"];
-  safeBinProfiles: ReturnType<typeof resolveExecSafeBinRuntimePolicy>["safeBinProfiles"];
-  trustedSafeBinDirs: ReturnType<typeof resolveExecSafeBinRuntimePolicy>["trustedSafeBinDirs"];
-  skillBins: SkillBinTrustEntry[];
-  autoAllowSkills: boolean;
   isWindows: boolean;
   policy: {
     approvedByAsk: boolean;
@@ -154,37 +153,39 @@ export async function resolveSystemRunExecArgv(params: {
   segments: ExecCommandSegment[];
   segmentSatisfiedBy: ExecSegmentSatisfiedBy[];
   authorizationPlan: ExecAuthorizationPlan | undefined;
-  cwd: string | undefined;
-  env: Record<string, string> | undefined;
 }): Promise<string[] | null> {
   let execArgv = params.plannedAllowlistArgv ?? params.argv;
   if (
-    params.security === "allowlist" &&
-    params.isWindows &&
-    !params.policy.approvedByAsk &&
-    params.shellCommand &&
-    params.policy.analysisOk &&
-    params.policy.allowlistSatisfied &&
-    params.segments.length === 1
+    params.security !== "allowlist" ||
+    params.policy.approvedByAsk ||
+    !params.shellCommand ||
+    !params.policy.analysisOk ||
+    !params.policy.allowlistSatisfied
   ) {
+    return execArgv;
+  }
+  const transportKind = resolvePosixShellInlineCommandTransportKind(params.argv);
+  if (transportKind === "opaque") {
+    return null;
+  }
+  if (params.isWindows && params.segments.length === 1) {
     // Exact-path matches stay bound to the resolved executable, while the bare
     // wildcard contract can still authorize unresolved Windows commands.
-    const plannedArgv = resolvePlannedSegmentArgv(params.segments[0]);
+    const plannedArgv = resolvePlannedSegmentArgv(
+      expectDefined(params.segments[0], "segments entry at 0"),
+    );
     if (!plannedArgv) {
       return null;
     }
     execArgv = plannedArgv;
   }
-  if (
-    params.security === "allowlist" &&
-    !params.isWindows &&
-    !params.policy.approvedByAsk &&
-    params.shellCommand &&
-    params.policy.analysisOk &&
-    params.policy.allowlistSatisfied &&
-    params.segmentSatisfiedBy.some((entry) => entry === "safeBins" || entry === "inlineChain") &&
-    isPosixShellInlineCommandTransport(params.argv)
-  ) {
+  if (!params.isWindows) {
+    if (
+      transportKind !== "parseable" ||
+      !params.segmentSatisfiedBy.some((entry) => entry === "safeBins" || entry === "inlineChain")
+    ) {
+      return execArgv;
+    }
     if (!params.authorizationPlan) {
       return null;
     }
@@ -209,12 +210,18 @@ export async function resolveSystemRunExecArgv(params: {
   return execArgv;
 }
 
-function isPosixShellInlineCommandTransport(argv: string[]): boolean {
+function resolvePosixShellInlineCommandTransportKind(
+  argv: string[],
+): "none" | "opaque" | "parseable" {
   const transportArgv = resolveShellWrapperTransportArgv(argv);
-  return Boolean(
-    transportArgv &&
-    POSIX_SHELL_WRAPPER_NAMES.has(normalizeExecutableToken(transportArgv[0] ?? "")),
-  );
+  if (!transportArgv) {
+    return "none";
+  }
+  const executable = normalizeExecutableToken(transportArgv[0] ?? "");
+  if (!POSIX_SHELL_WRAPPERS.has(executable)) {
+    return "none";
+  }
+  return POSIX_PARSEABLE_SHELL_WRAPPERS.has(executable) ? "parseable" : "opaque";
 }
 
 function findSubsequence(haystack: readonly string[], needle: readonly string[]): number {
@@ -244,7 +251,7 @@ function replacePosixShellInlineCommand(params: {
   const transportArgv = resolveShellWrapperTransportArgv(params.argv);
   if (
     !transportArgv ||
-    !POSIX_SHELL_WRAPPER_NAMES.has(normalizeExecutableToken(transportArgv[0] ?? ""))
+    !POSIX_PARSEABLE_SHELL_WRAPPERS.has(normalizeExecutableToken(transportArgv[0] ?? ""))
   ) {
     return null;
   }

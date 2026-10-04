@@ -1,4 +1,3 @@
-// Feishu plugin module implements async behavior.
 import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 
 const RACE_TIMEOUT = Symbol("race-timeout");
@@ -101,10 +100,7 @@ export function waitForAbortableDelay(
       return;
     }
 
-    timer = setTimeout(
-      () => finish(true),
-      resolveTimerTimeoutMs(delayMs, 1),
-    );
+    timer = setTimeout(() => finish(true), resolveTimerTimeoutMs(delayMs, 1));
     timer.unref?.();
   });
 }

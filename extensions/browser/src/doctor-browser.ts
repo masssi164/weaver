@@ -1,22 +1,20 @@
-/**
- * Browser doctor checks for Chrome MCP readiness and legacy managed-profile
- * residue cleanup.
- */
 import fs from "node:fs";
 import path from "node:path";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { formatCliCommand, note } from "openclaw/plugin-sdk/cli-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { isPathInside } from "openclaw/plugin-sdk/file-access-runtime";
 import {
-  parseBrowserMajorVersion,
-  readBrowserVersion,
+  asNullableRecord,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
+import { CONFIG_DIR, resolveUserPath } from "openclaw/plugin-sdk/text-utility-runtime";
+import { parseBrowserMajorVersion, readBrowserVersion } from "./browser/chrome.executable-probe.js";
+import {
   resolveBrowserExecutableForPlatform,
   resolveGoogleChromeExecutableForPlatform,
 } from "./browser/chrome.executables.js";
 import { DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME, resolveBrowserConfig } from "./browser/config.js";
 import { movePathToTrash } from "./browser/trash.js";
-import type { OpenClawConfig } from "./config/config.js";
-import { asRecord } from "./record-shared.js";
-import { formatCliCommand, note } from "./sdk-setup-tools.js";
-import { CONFIG_DIR, resolveUserPath } from "./utils.js";
 
 const CHROME_MCP_MIN_MAJOR = 144;
 const LEGACY_CLAWD_BROWSER_PROFILE_NAME = "clawd";
@@ -31,11 +29,6 @@ type ExistingSessionProfile = {
   userDataDir?: string;
 };
 
-type ManagedProfile = {
-  name: string;
-};
-
-/** Legacy managed clawd profile paths that can be archived by doctor --fix. */
 export type LegacyClawdBrowserProfileResidue = {
   legacyProfileDir: string;
   legacyUserDataDir: string;
@@ -48,85 +41,32 @@ type BrowserDoctorFilesystemDeps = {
   movePathToTrash?: (targetPath: string) => Promise<string>;
 };
 
-function collectChromeMcpProfiles(cfg: OpenClawConfig): ExistingSessionProfile[] {
-  const browser = asRecord(cfg.browser);
-  if (!browser) {
-    return [];
+function collectBrowserDoctorProfiles(cfg: OpenClawConfig) {
+  const browser = asNullableRecord(cfg.browser);
+  const managed = new Map<string, ExistingSessionProfile>();
+  const chromeMcp = new Map<string, ExistingSessionProfile>();
+  const defaultProfile = normalizeOptionalString(browser?.defaultProfile);
+  if (defaultProfile) {
+    (defaultProfile === "user" ? chromeMcp : managed).set(defaultProfile, {
+      name: defaultProfile,
+    });
   }
-
-  const profiles = new Map<string, ExistingSessionProfile>();
-  const defaultProfile = normalizeOptionalString(browser.defaultProfile) ?? "";
-  if (defaultProfile === "user") {
-    profiles.set("user", { name: "user" });
-  }
-
-  const configuredProfiles = asRecord(browser.profiles);
-  if (!configuredProfiles) {
-    return [...profiles.values()].toSorted((a, b) => a.name.localeCompare(b.name));
-  }
-
-  for (const [profileName, rawProfile] of Object.entries(configuredProfiles)) {
-    const profile = asRecord(rawProfile);
-    const driver = normalizeOptionalString(profile?.driver) ?? "";
-    if (driver === "existing-session") {
-      profiles.set(profileName, {
-        name: profileName,
-        userDataDir: normalizeOptionalString(profile?.userDataDir),
-      });
+  for (const [name, rawProfile] of Object.entries(asNullableRecord(browser?.profiles) ?? {})) {
+    const profile = asNullableRecord(rawProfile);
+    if (normalizeOptionalString(profile?.driver) === "existing-session") {
+      chromeMcp.set(name, { name, userDataDir: normalizeOptionalString(profile?.userDataDir) });
+    } else {
+      managed.set(name, { name });
     }
   }
-
-  return [...profiles.values()].toSorted((a, b) => a.name.localeCompare(b.name));
-}
-
-function collectManagedProfiles(cfg: OpenClawConfig): ManagedProfile[] {
-  const browser = asRecord(cfg.browser);
-  if (!browser) {
-    return [];
-  }
-
-  const profiles = new Map<string, ManagedProfile>();
-  const defaultProfile = normalizeOptionalString(browser.defaultProfile) ?? "";
-  if (defaultProfile && defaultProfile !== "user") {
-    profiles.set(defaultProfile, { name: defaultProfile });
-  }
-
-  const configuredProfiles = asRecord(browser.profiles);
-  if (!configuredProfiles) {
-    return [...profiles.values()].toSorted((a, b) => a.name.localeCompare(b.name));
-  }
-
-  for (const [profileName, rawProfile] of Object.entries(configuredProfiles)) {
-    const profile = asRecord(rawProfile);
-    const driver = normalizeOptionalString(profile?.driver) ?? "openclaw";
-    if (driver !== "existing-session") {
-      profiles.set(profileName, { name: profileName });
-    }
-  }
-
-  return [...profiles.values()].toSorted((a, b) => a.name.localeCompare(b.name));
-}
-
-function resolveManagedBrowserProfileDir(configDir: string, profileName: string): string {
-  return path.join(configDir, "browser", profileName);
-}
-
-function resolveManagedBrowserUserDataDir(configDir: string, profileName: string): string {
-  return path.join(resolveManagedBrowserProfileDir(configDir, profileName), "user-data");
-}
-
-function normalizeComparablePath(targetPath: string): string {
-  return path.resolve(targetPath);
-}
-
-function isSameOrChildPath(candidatePath: string, parentPath: string): boolean {
-  const candidate = normalizeComparablePath(candidatePath);
-  const parent = normalizeComparablePath(parentPath);
-  return candidate === parent || candidate.startsWith(`${parent}${path.sep}`);
+  return {
+    managed: [...managed.values()].toSorted((a, b) => a.name.localeCompare(b.name)),
+    chromeMcp: [...chromeMcp.values()].toSorted((a, b) => a.name.localeCompare(b.name)),
+  };
 }
 
 function isLegacyClawdProfileConfigured(cfg: OpenClawConfig, legacyProfileDir: string): boolean {
-  const browser = asRecord(cfg.browser);
+  const browser = asNullableRecord(cfg.browser);
   if (!browser) {
     return false;
   }
@@ -134,7 +74,7 @@ function isLegacyClawdProfileConfigured(cfg: OpenClawConfig, legacyProfileDir: s
     return true;
   }
 
-  const configuredProfiles = asRecord(browser.profiles);
+  const configuredProfiles = asNullableRecord(browser.profiles);
   if (!configuredProfiles) {
     return false;
   }
@@ -143,29 +83,22 @@ function isLegacyClawdProfileConfigured(cfg: OpenClawConfig, legacyProfileDir: s
   }
 
   for (const rawProfile of Object.values(configuredProfiles)) {
-    const profile = asRecord(rawProfile);
+    const profile = asNullableRecord(rawProfile);
     const userDataDir = normalizeOptionalString(profile?.userDataDir);
-    if (userDataDir && isSameOrChildPath(resolveUserPath(userDataDir), legacyProfileDir)) {
+    if (userDataDir && isPathInside(legacyProfileDir, resolveUserPath(userDataDir))) {
       return true;
     }
   }
   return false;
 }
 
-/** Detects unmanaged legacy clawd browser profile residue on disk. */
 export function detectLegacyClawdBrowserProfileResidue(
   cfg: OpenClawConfig,
   deps?: BrowserDoctorFilesystemDeps,
 ): LegacyClawdBrowserProfileResidue | null {
   const configDir = deps?.configDir ?? CONFIG_DIR;
-  const legacyProfileDir = resolveManagedBrowserProfileDir(
-    configDir,
-    LEGACY_CLAWD_BROWSER_PROFILE_NAME,
-  );
-  const legacyUserDataDir = resolveManagedBrowserUserDataDir(
-    configDir,
-    LEGACY_CLAWD_BROWSER_PROFILE_NAME,
-  );
+  const legacyProfileDir = path.join(configDir, "browser", LEGACY_CLAWD_BROWSER_PROFILE_NAME);
+  const legacyUserDataDir = path.join(legacyProfileDir, "user-data");
   const pathExists = deps?.pathExists ?? fs.existsSync;
   if (!pathExists(legacyProfileDir) && !pathExists(legacyUserDataDir)) {
     return null;
@@ -187,9 +120,11 @@ export function detectLegacyClawdBrowserProfileResidue(
   return {
     legacyProfileDir,
     legacyUserDataDir,
-    canonicalUserDataDir: resolveManagedBrowserUserDataDir(
+    canonicalUserDataDir: path.join(
       configDir,
+      "browser",
       DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME,
+      "user-data",
     ),
   };
 }
@@ -204,7 +139,6 @@ function formatLegacyClawdBrowserProfileResidueNote(
   ].join("\n");
 }
 
-/** Emits Browser doctor notes for Chrome MCP, managed Chrome, and legacy residue readiness. */
 export async function noteChromeMcpBrowserReadiness(
   cfg: OpenClawConfig,
   deps?: {
@@ -228,15 +162,50 @@ export async function noteChromeMcpBrowserReadiness(
   const resolveChromeExecutable =
     deps?.resolveChromeExecutable ?? resolveGoogleChromeExecutableForPlatform;
   const readVersion = deps?.readVersion ?? readBrowserVersion;
-  const managedProfiles = collectManagedProfiles(cfg);
+  const { managed: managedProfiles, chromeMcp: profiles } = collectBrowserDoctorProfiles(cfg);
   const managedProfileLabel = managedProfiles.map((profile) => profile.name).join(", ");
   const resolved = resolveBrowserConfig(cfg.browser, cfg);
+  if (resolved.enabled && resolved.extensionRelay.allowLegacyAuth) {
+    noteFn(
+      [
+        "- Legacy Browser Relay Authentication is enabled (browser.extensionRelay.allowLegacyAuth=true).",
+        "- Update paired Chrome extensions and external CDP clients to Browser Relay Authentication v2, then set browser.extensionRelay.allowLegacyAuth=false.",
+        "- V2 clients never downgrade to legacy authentication.",
+      ].join("\n"),
+      "Browser relay authentication",
+    );
+  }
+  const extensionStateDir = deps?.configDir ?? CONFIG_DIR;
+  const extensionCopyPath = path.join(extensionStateDir, "browser", "chrome-extension");
+  // General Doctor also runs unattended inside the Gateway. Profile discovery can
+  // block on OS permission prompts, so leave it to explicit browser commands.
+  if (fs.existsSync(extensionCopyPath)) {
+    noteFn(
+      [
+        "- Chrome extension native bootstrap was not inspected; registration status is unavailable in Doctor.",
+        `- Run ${formatCliCommand("openclaw browser extension status --json")} to inspect it explicitly; this may request browser profile access.`,
+        `- Run ${formatCliCommand("openclaw browser extension install")} if setup or repair is needed.`,
+      ].join("\n"),
+      "Browser extension bootstrap",
+    );
+  }
   const legacyClawdResidue = detectLegacyClawdBrowserProfileResidue(cfg, {
     configDir: deps?.configDir,
     pathExists: deps?.pathExists,
   });
   if (legacyClawdResidue) {
     noteFn(formatLegacyClawdBrowserProfileResidueNote(legacyClawdResidue), "Browser");
+  }
+  if (platform === "darwin") {
+    const importEnabled = cfg.browser?.allowSystemProfileImport !== false;
+    noteFn(
+      [
+        `- System browser profile cookie import is ${importEnabled ? "enabled" : "disabled"} (browser.allowSystemProfileImport).`,
+        "- System browser profile discovery skipped by Doctor; importable cookie database count is unavailable.",
+        "- Doctor does not access the macOS Keychain; importing asks for consent separately.",
+      ].join("\n"),
+      "Browser",
+    );
   }
   const browserExecutable =
     managedProfiles.length > 0 ? resolveManagedExecutable(resolved, platform) : null;
@@ -275,7 +244,6 @@ export async function noteChromeMcpBrowserReadiness(
     noteFn(lines.join("\n"), "Browser");
   }
 
-  const profiles = collectChromeMcpProfiles(cfg);
   if (profiles.length === 0) {
     return;
   }
@@ -355,7 +323,23 @@ export async function noteChromeMcpBrowserReadiness(
   noteFn(lines.join("\n"), "Browser");
 }
 
-/** Archives legacy clawd browser profile residue when doctor --fix is requested. */
+/** Leave discovery-dependent native-host repair to explicit extension setup. */
+export async function maybeRepairOwnedChromeExtensionNativeHosts(): Promise<{
+  status: "skipped";
+  reason: string;
+  changes: string[];
+  warnings: string[];
+}> {
+  return {
+    status: "skipped",
+    reason: "Doctor does not inspect personal browser profiles",
+    changes: [],
+    warnings: [
+      `Chrome extension native-host repair skipped: Doctor does not inspect personal browser profiles. Run ${formatCliCommand("openclaw browser extension install")} to repair explicitly.`,
+    ],
+  };
+}
+
 export async function maybeArchiveLegacyClawdBrowserProfileResidue(
   cfg: OpenClawConfig,
   deps?: BrowserDoctorFilesystemDeps,

@@ -1,8 +1,13 @@
 // CLI utility tests cover shared command helpers, option parsing, and output formatting.
 import { Command } from "commander";
 import { describe, expect, it, vi } from "vitest";
+import { defaultRuntime, ExitError } from "../runtime.js";
 import { runCommandWithRuntime } from "./cli-utils.js";
 import { registerDnsCli } from "./dns-cli.js";
+import {
+  applyResolvedCommandOutputMode,
+  withConsoleLogsRoutedToStderrForJson,
+} from "./json-output-mode.js";
 import { parseByteSize } from "./parse-bytes.js";
 import { parseDurationMs } from "./parse-duration.js";
 import {
@@ -35,7 +40,33 @@ describe("waitForever", () => {
 });
 
 describe("runCommandWithRuntime", () => {
-  it("surfaces cause chains and error codes through the default runtime", async () => {
+  it.each([
+    { code: 0, customErrorHandler: false },
+    { code: 2, customErrorHandler: true },
+  ])(
+    "preserves completed exit $code with custom error handler $customErrorHandler",
+    async ({ code, customErrorHandler }) => {
+      const runtime = { error: vi.fn(), exit: vi.fn() };
+      const onError = vi.fn();
+      const outcome = new ExitError(code);
+
+      await expect(
+        runCommandWithRuntime(
+          runtime,
+          async () => {
+            throw outcome;
+          },
+          customErrorHandler ? onError : undefined,
+        ),
+      ).rejects.toBe(outcome);
+
+      expect(runtime.error).not.toHaveBeenCalled();
+      expect(runtime.exit).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps cause chains and error codes behind debug intent", async () => {
     const messages: string[] = [];
     const exits: number[] = [];
     const cause = Object.assign(new Error("invalid onRequestStart method"), {
@@ -43,21 +74,57 @@ describe("runCommandWithRuntime", () => {
     });
     const fetchError = Object.assign(new TypeError("fetch failed"), { cause });
 
-    await runCommandWithRuntime(
-      {
-        error: (message) => messages.push(message),
-        exit: (code) => exits.push(code),
-      },
-      async () => {
-        throw fetchError;
-      },
-    );
+    const run = async () =>
+      await runCommandWithRuntime(
+        {
+          error: (message) => messages.push(message),
+          exit: (code) => exits.push(code),
+        },
+        async () => {
+          throw fetchError;
+        },
+      );
 
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain("TypeError: fetch failed");
-    expect(messages[0]).toContain("invalid onRequestStart method");
-    expect(messages[0]).toContain("UND_ERR_INVALID_ARG");
-    expect(exits).toEqual([1]);
+    const originalDebug = process.env.OPENCLAW_DEBUG;
+    delete process.env.OPENCLAW_DEBUG;
+    try {
+      await run();
+      process.env.OPENCLAW_DEBUG = "1";
+      await run();
+    } finally {
+      if (originalDebug === undefined) {
+        delete process.env.OPENCLAW_DEBUG;
+      } else {
+        process.env.OPENCLAW_DEBUG = originalDebug;
+      }
+    }
+
+    expect(messages).toEqual([
+      "fetch failed",
+      "fetch failed | invalid onRequestStart method | UND_ERR_INVALID_ARG",
+    ]);
+    expect(exits).toEqual([1, 1]);
+  });
+
+  it("bubbles JSON-mode failures to the process-level owner", async () => {
+    const originalArgv = process.argv;
+    const runtime = { error: vi.fn(), exit: vi.fn() };
+    process.argv = ["node", "openclaw", "backup", "verify", "missing.tgz", "--json"];
+    try {
+      await withConsoleLogsRoutedToStderrForJson(process.argv, async () => {
+        applyResolvedCommandOutputMode(true);
+        await expect(
+          runCommandWithRuntime(runtime, async () => {
+            throw new Error("archive missing");
+          }),
+        ).rejects.toThrow("archive missing");
+      });
+    } finally {
+      process.argv = originalArgv;
+    }
+
+    expect(runtime.error).not.toHaveBeenCalled();
+    expect(runtime.exit).not.toHaveBeenCalled();
   });
 });
 
@@ -68,11 +135,21 @@ describe("shouldSkipRespawnForArgv", () => {
     { argv: ["node", "openclaw", "tui"] },
     { argv: ["node", "openclaw", "terminal"] },
     { argv: ["node", "openclaw", "chat"] },
+    { argv: ["node", "openclaw", "hooks", "relay", "--relay-id", "relay-1"] },
     { argv: ["node", "openclaw", "gateway"] },
     { argv: ["node", "openclaw", "gateway", "--port", "14720", "--bind", "loopback"] },
     { argv: ["node", "openclaw", "gateway", "run", "--port=14720", "--bind", "loopback"] },
+    { argv: ["node", "openclaw", "gateway", "--update-canary"] },
+    { argv: ["node", "openclaw", "gateway", "run", "--update-canary", "--port=14720"] },
+    { argv: ["node", "openclaw", "gateway", "status"] },
+    { argv: ["node", "openclaw", "--", "gateway", "run"] },
+    { argv: ["node", "openclaw", "gateway", "--", "status"] },
+    { argv: ["node", "openclaw", "gateway", "--token", "test-token", "status"] },
     {
       argv: ["node", "openclaw", "--profile", "server", "gateway", "run", "--allow-unconfigured"],
+    },
+    {
+      argv: ["node", "openclaw", "--profile", "server", "gateway", "status", "--json"],
     },
   ] as const)("skips respawn for argv %j", ({ argv }) => {
     expect(shouldSkipRespawnForArgv([...argv]), argv.join(" ")).toBe(true);
@@ -80,18 +157,30 @@ describe("shouldSkipRespawnForArgv", () => {
 
   it.each([
     { argv: ["node", "openclaw", "status"] },
-    { argv: ["node", "openclaw", "gateway", "status"] },
     { argv: ["node", "openclaw", "gateway", "call", "health"] },
   ] as const)("keeps respawn path for argv %j", ({ argv }) => {
     expect(shouldSkipRespawnForArgv([...argv]), argv.join(" ")).toBe(false);
+  });
+
+  it("keeps native hook relay respawn behavior unchanged on Windows", () => {
+    expect(
+      shouldSkipRespawnForArgv(
+        ["node", "openclaw", "hooks", "relay", "--relay-id", "relay-1"],
+        "win32",
+      ),
+    ).toBe(false);
   });
 });
 
 describe("shouldSkipStartupEnvironmentRespawnForArgv", () => {
   it.each([
     { argv: ["node", "openclaw", "--help"] },
+    { argv: ["node", "openclaw", "hooks", "relay", "--relay-id", "relay-1"] },
     { argv: ["node", "openclaw", "gateway"] },
     { argv: ["node", "openclaw", "gateway", "run", "--port=14720"] },
+    { argv: ["node", "openclaw", "gateway", "--update-canary"] },
+    { argv: ["node", "openclaw", "gateway", "run", "--update-canary", "--port=14720"] },
+    { argv: ["node", "openclaw", "--", "gateway", "run"] },
   ] as const)("skips startup env respawn for argv %j", ({ argv }) => {
     expect(shouldSkipStartupEnvironmentRespawnForArgv([...argv]), argv.join(" ")).toBe(true);
   });
@@ -101,14 +190,26 @@ describe("shouldSkipStartupEnvironmentRespawnForArgv", () => {
     { argv: ["node", "openclaw", "terminal"] },
     { argv: ["node", "openclaw", "chat"] },
     { argv: ["node", "openclaw", "status"] },
+    { argv: ["node", "openclaw", "gateway", "--", "status"] },
+    { argv: ["node", "openclaw", "--", "gateway", "run", "--force"] },
   ] as const)("allows startup env respawn for argv %j", ({ argv }) => {
     expect(shouldSkipStartupEnvironmentRespawnForArgv([...argv]), argv.join(" ")).toBe(false);
+  });
+
+  it("keeps native hook relay startup environment respawn on Windows", () => {
+    expect(
+      shouldSkipStartupEnvironmentRespawnForArgv(
+        ["node", "openclaw", "hooks", "relay", "--relay-id", "relay-1"],
+        "win32",
+      ),
+    ).toBe(false);
   });
 });
 
 describe("dns cli", () => {
   it("prints setup info (no apply)", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const writeJson = vi.spyOn(defaultRuntime, "writeJson").mockImplementation(() => {});
     try {
       const program = new Command();
       registerDnsCli(program);
@@ -116,7 +217,12 @@ describe("dns cli", () => {
       const output = log.mock.calls.map((call) => call.join(" ")).join("\\n");
       expect(output).toContain("DNS setup");
       expect(output).toContain("openclaw.internal");
+      expect(writeJson).toHaveBeenCalledWith({
+        gateway: { bind: "auto" },
+        discovery: { wideArea: { domain: "openclaw.internal." } },
+      });
     } finally {
+      writeJson.mockRestore();
       log.mockRestore();
     }
   });
@@ -159,6 +265,17 @@ describe("parseByteSize", () => {
   it.each(["", "nope", "-5kb"] as const)("rejects invalid value %j", (input) => {
     expect(() => parseByteSize(input)).toThrow(/Invalid byte size/);
   });
+  it("keeps the largest safe integer exact", () => {
+    expect(parseByteSize(String(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseByteSize(`${Number.MAX_SAFE_INTEGER}.1`)).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it.each([String(Number.MAX_SAFE_INTEGER + 1), "9007199254740993", "9000000tb"] as const)(
+    "rejects finite-but-unsafe values that would round to a different number: %j",
+    (input) => {
+      expect(() => parseByteSize(input)).toThrow(/Invalid byte size/);
+    },
+  );
 });
 
 describe("parseDurationMs", () => {
@@ -171,17 +288,67 @@ describe("parseDurationMs", () => {
     ["supports decimals", "0.5s", 500],
     ["parses composite hours+minutes", "1h30m", 5_400_000],
     ["parses composite with milliseconds", "2m500ms", 120_500],
+    ["normalizes surrounding whitespace and case", "  1H30M  ", 5_400_000],
+    ["accepts leading zeros", "0001.25s", 1250],
+    ["accepts zero", "0ms", 0],
+    ["rounds fractions of a millisecond", "0.5ms", 1],
+    ["rounds once after summing segments", "0.4ms0.4ms", 1],
+    ["allows repeated units in any order", "30m1h30m", 7_200_000],
   ] as const)("%s", (_name, input, expected) => {
     expect(parseDurationMs(input)).toBe(expected);
   });
 
-  it("rejects invalid composite strings", () => {
-    expect(() => parseDurationMs("1h30")).toThrow(/Invalid duration/);
-    expect(() => parseDurationMs("1h-30m")).toThrow(/Invalid duration/);
+  it.each([
+    ["ms", "1.5", 2],
+    ["s", "1.25", 1250],
+    ["m", "1.5", 90_000],
+    ["h", "0.25", 900_000],
+    ["d", "0.5", 43_200_000],
+  ] as const)("uses default unit %s only for bare numbers", (defaultUnit, input, expected) => {
+    expect(parseDurationMs(input, { defaultUnit })).toBe(expected);
+    expect(parseDurationMs("1s", { defaultUnit })).toBe(1000);
+  });
+
+  it.each([
+    "",
+    " ",
+    "-1s",
+    "+1s",
+    ".5s",
+    "1.s",
+    "1e3s",
+    "Infinity",
+    "NaN",
+    "1 seconds",
+    "1sec",
+    "1w",
+    "1y",
+    "1h 30m",
+    "1h30",
+    "1h-30m",
+  ])("rejects values outside the CLI duration grammar: %j", (input) => {
+    expect(() => parseDurationMs(input)).toThrow(/Invalid duration/);
+  });
+
+  it("retains the 100-character limit per token, including the default unit", () => {
+    const value = `${"0".repeat(97)}1`;
+    expect(parseDurationMs(`${value}ms`)).toBe(1);
+    expect(parseDurationMs(value)).toBe(1);
+    expect(parseDurationMs(`0${value}`, { defaultUnit: "s" })).toBe(1000);
+    expect(parseDurationMs("1ms".repeat(40))).toBe(40);
+    expect(() => parseDurationMs(`0${value}ms`)).toThrow(/Invalid duration/);
+    expect(() => parseDurationMs(`0${value}`)).toThrow(/Invalid duration/);
+    expect(() => parseDurationMs(`1s0${value}ms`)).toThrow(/Invalid duration/);
+  });
+
+  it("keeps safe integer results exact", () => {
+    expect(parseDurationMs("9007199254740991ms")).toBe(Number.MAX_SAFE_INTEGER);
+    expect(parseDurationMs("9007199254740990ms1ms")).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it("rejects unsafe millisecond results", () => {
     expect(() => parseDurationMs("9007199254740993ms")).toThrow(/Invalid duration/);
     expect(() => parseDurationMs("9007199254740990ms10ms")).toThrow(/Invalid duration/);
+    expect(() => parseDurationMs("99999999999999999999d")).toThrow(/Invalid duration/);
   });
 });

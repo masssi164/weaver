@@ -21,7 +21,6 @@ const CHANNEL_REGISTRY_WHY =
 const CHANNEL_REGISTRY_FIX =
   "keep the seam behind a lazy getter/runtime boundary so import stays cold and the first real lookup loads once.";
 const HOT_RUNTIME_IMPORT_CASES = [
-  ["src/config/markdown-tables.ts", () => import("../../config/markdown-tables.js")],
   [
     "src/plugin-sdk/approval-handler-adapter-runtime.ts",
     () => import("../../plugin-sdk/approval-handler-adapter-runtime.js"),
@@ -29,6 +28,10 @@ const HOT_RUNTIME_IMPORT_CASES = [
   [
     "src/plugin-sdk/approval-gateway-runtime.ts",
     () => import("../../plugin-sdk/approval-gateway-runtime.js"),
+  ],
+  [
+    "src/plugin-sdk/approval-reference-runtime.ts",
+    () => import("../../plugin-sdk/approval-reference-runtime.js"),
   ],
   ["src/plugins/runtime/runtime-system.ts", () => import("../runtime/runtime-system.js")],
   ["src/web-search/runtime.ts", () => import("../../web-search/runtime.js")],

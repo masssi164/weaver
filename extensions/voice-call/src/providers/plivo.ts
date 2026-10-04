@@ -1,4 +1,3 @@
-// Voice Call plugin module implements plivo behavior.
 import crypto from "node:crypto";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -24,7 +23,7 @@ import type {
 import { escapeXml } from "../voice-mapping.js";
 import { reconstructWebhookUrl, verifyPlivoWebhook } from "../webhook-security.js";
 import type { VoiceCallProvider } from "./base.js";
-import { guardedJsonApiRequest } from "./shared/guarded-json-api.js";
+import { guardedJsonApiRequest, readProviderCallStatus } from "./shared/guarded-json-api.js";
 
 interface PlivoProviderOptions {
   /** Override public URL origin for signature verification */
@@ -70,6 +69,42 @@ export class PlivoProvider implements VoiceCallProvider {
 
   private pendingSpeakByCallId = new Map<string, PendingSpeak>();
   private pendingListenByCallId = new Map<string, PendingListen>();
+
+  /**
+   * Release all process-local metadata owned by one Plivo call.
+   * Terminal webhooks can be replayed, so this must stay idempotent.
+   */
+  private releaseCallState(params: {
+    callId?: string;
+    providerCallId?: string;
+    callUuid?: string;
+  }): void {
+    if (params.callId) {
+      this.callIdToWebhookUrl.delete(params.callId);
+      this.pendingSpeakByCallId.delete(params.callId);
+      this.pendingListenByCallId.delete(params.callId);
+    }
+
+    const callUuid =
+      params.callUuid ||
+      (params.providerCallId
+        ? (this.requestUuidToCallUuid.get(params.providerCallId) ?? params.providerCallId)
+        : undefined);
+    if (params.providerCallId) {
+      this.requestUuidToCallUuid.delete(params.providerCallId);
+      this.callUuidToWebhookUrl.delete(params.providerCallId);
+    }
+    if (!callUuid) {
+      return;
+    }
+
+    this.callUuidToWebhookUrl.delete(callUuid);
+    for (const [requestUuid, mappedCallUuid] of this.requestUuidToCallUuid) {
+      if (mappedCallUuid === callUuid) {
+        this.requestUuidToCallUuid.delete(requestUuid);
+      }
+    }
+  }
 
   constructor(config: PlivoConfig, options: PlivoProviderOptions = {}) {
     if (!config.authId) {
@@ -127,6 +162,7 @@ export class PlivoProvider implements VoiceCallProvider {
       reason: result.reason,
       isReplay: result.isReplay,
       verifiedRequestKey: result.verifiedRequestKey,
+      releaseReplay: result.releaseReplay,
     };
   }
 
@@ -136,10 +172,7 @@ export class PlivoProvider implements VoiceCallProvider {
   ): ProviderWebhookParseResult {
     const flow = normalizeOptionalString(ctx.query?.flow) ?? "";
 
-    const parsed = this.parseBody(ctx.rawBody);
-    if (!parsed) {
-      return { events: [], statusCode: 400 };
-    }
+    const parsed = new URLSearchParams(ctx.rawBody);
 
     // Keep providerCallId mapping for later call control.
     const callUuid = parsed.get("CallUUID") || undefined;
@@ -152,7 +185,7 @@ export class PlivoProvider implements VoiceCallProvider {
 
     // Special flows that exist only to return Plivo XML (no events).
     if (flow === "xml-speak") {
-      const callId = this.getCallIdFromQuery(ctx);
+      const callId = normalizeOptionalString(ctx.query?.callId);
       const pending = callId ? this.pendingSpeakByCallId.get(callId) : undefined;
       if (callId) {
         this.pendingSpeakByCallId.delete(callId);
@@ -180,7 +213,7 @@ export class PlivoProvider implements VoiceCallProvider {
     }
 
     if (flow === "xml-listen") {
-      const callId = this.getCallIdFromQuery(ctx);
+      const callId = normalizeOptionalString(ctx.query?.callId);
       const pending = callId ? this.pendingListenByCallId.get(callId) : undefined;
       if (callId) {
         this.pendingListenByCallId.delete(callId);
@@ -208,7 +241,7 @@ export class PlivoProvider implements VoiceCallProvider {
     }
 
     // Normal events.
-    const callIdFromQuery = this.getCallIdFromQuery(ctx);
+    const callIdFromQuery = normalizeOptionalString(ctx.query?.callId);
     const dedupeKey = options?.verifiedRequestKey ?? createPlivoRequestDedupeKey(ctx);
     const event = this.normalizeEvent(parsed, callIdFromQuery, dedupeKey);
 
@@ -286,18 +319,17 @@ export class PlivoProvider implements VoiceCallProvider {
       callStatus === "no-answer" ||
       callStatus === "failed"
     ) {
-      return {
+      const event: NormalizedEvent = {
         ...baseEvent,
         type: "call.ended",
-        reason:
-          callStatus === "completed"
-            ? "completed"
-            : callStatus === "busy"
-              ? "busy"
-              : callStatus === "no-answer"
-                ? "no-answer"
-                : "failed",
+        reason: callStatus,
       };
+      this.releaseCallState({
+        callId: baseEvent.callId || undefined,
+        providerCallId: callUuid || requestUuid || undefined,
+        callUuid: callUuid || undefined,
+      });
+      return event;
     }
 
     // Plivo will call our answer_url when the call is answered; if we don't have
@@ -357,6 +389,11 @@ export class PlivoProvider implements VoiceCallProvider {
         endpoint: `/Call/${callUuid}/`,
         allowNotFound: true,
       });
+      this.releaseCallState({
+        callId: input.callId,
+        providerCallId: input.providerCallId,
+        callUuid,
+      });
       return;
     }
 
@@ -370,6 +407,10 @@ export class PlivoProvider implements VoiceCallProvider {
       method: "DELETE",
       endpoint: `/Request/${input.providerCallId}/`,
       allowNotFound: true,
+    });
+    this.releaseCallState({
+      callId: input.callId,
+      providerCallId: input.providerCallId,
     });
   }
 
@@ -470,28 +511,24 @@ export class PlivoProvider implements VoiceCallProvider {
       "machine",
       "hangup",
     ]);
-    try {
-      const data = await guardedJsonApiRequest<{ call_status?: string }>({
-        url: `${this.baseUrl}/Call/${input.providerCallId}/`,
-        method: "GET",
-        headers: {
-          Authorization: `Basic ${Buffer.from(`${this.authId}:${this.authToken}`).toString("base64")}`,
-        },
-        allowNotFound: true,
-        allowedHostnames: [this.apiHost],
-        auditContext: "plivo-get-call-status",
-        errorPrefix: "Plivo get call status error",
-      });
-
-      if (!data) {
-        return { status: "not-found", isTerminal: true };
-      }
-
-      const status = data.call_status ?? "unknown";
-      return { status, isTerminal: terminalStatuses.has(status) };
-    } catch {
-      return { status: "error", isTerminal: false, isUnknown: true };
-    }
+    return readProviderCallStatus(
+      () =>
+        guardedJsonApiRequest<{ call_status?: string }>({
+          url: `${this.baseUrl}/Call/${input.providerCallId}/`,
+          method: "GET",
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${this.authId}:${this.authToken}`).toString("base64")}`,
+          },
+          allowNotFound: true,
+          allowedHostnames: [this.apiHost],
+          auditContext: "plivo-get-call-status",
+          errorPrefix: "Plivo get call status error",
+        }),
+      (data) => {
+        const status = data.call_status ?? "unknown";
+        return { status, isTerminal: terminalStatuses.has(status) };
+      },
+    );
   }
 
   private static normalizeNumber(numberOrSip: string): string {
@@ -547,11 +584,6 @@ export class PlivoProvider implements VoiceCallProvider {
 </Response>`;
   }
 
-  private getCallIdFromQuery(ctx: WebhookContext): string | undefined {
-    const callId = normalizeOptionalString(ctx.query?.callId);
-    return callId || undefined;
-  }
-
   private buildActionUrl(
     ctx: WebhookContext,
     opts: { flow: string; callId?: string },
@@ -574,8 +606,6 @@ export class PlivoProvider implements VoiceCallProvider {
     try {
       if (this.options.publicUrl) {
         const base = new URL(this.options.publicUrl);
-        const requestUrl = new URL(ctx.url);
-        base.pathname = requestUrl.pathname;
         return `${base.origin}${base.pathname}`;
       }
 
@@ -588,14 +618,6 @@ export class PlivoProvider implements VoiceCallProvider {
         }),
       );
       return `${u.origin}${u.pathname}`;
-    } catch {
-      return null;
-    }
-  }
-
-  private parseBody(rawBody: string): URLSearchParams | null {
-    try {
-      return new URLSearchParams(rawBody);
     } catch {
       return null;
     }

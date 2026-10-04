@@ -28,12 +28,11 @@ export function normalizeWindowsArgv(
     return out;
   };
 
-  const normalizeArg = (value: string): string =>
+  const normalizeCandidate = (value: string): string =>
     stripControlChars(value)
       .replace(/^['"]+|['"]+$/g, "")
-      .trim();
-  const normalizeCandidate = (value: string): string =>
-    normalizeArg(value).replace(/^\\\\\\?\\/, "");
+      .trim()
+      .replace(/^\\\\\\?\\/, "");
   const basename = (value: string): string => value.split(/[\\/]/).pop() ?? value;
 
   const execPath = normalizeCandidate(options.execPath ?? process.execPath);
@@ -49,40 +48,12 @@ export function normalizeWindowsArgv(
     }
     const lower = normalizeLowercaseStringOrEmpty(normalized);
     const base = basename(lower);
-    return (
-      lower === execPathLower ||
-      base === execBase ||
-      lower.endsWith("\\node.exe") ||
-      lower.endsWith("/node.exe") ||
-      base === "node.exe"
-    );
+    return lower === execPathLower || base === execBase || base === "node.exe";
   };
 
-  const argv0IsExecPath = isExecPath(argv[0]);
   const next = [...argv];
-  let removedLauncherPrefix = false;
-  for (const i = 1; i < next.length; ) {
-    if (isExecPath(next[i])) {
-      next.splice(i, 1);
-      removedLauncherPrefix = true;
-      continue;
-    }
-    break;
+  while (isExecPath(next[1])) {
+    next.splice(1, 1);
   }
-  if (next.length < 3 || (!argv0IsExecPath && !removedLauncherPrefix)) {
-    return next;
-  }
-  const cleaned = [...next];
-  for (const i = 2; i < cleaned.length; ) {
-    const arg = cleaned[i];
-    if (!arg || arg.startsWith("-")) {
-      break;
-    }
-    if (isExecPath(arg)) {
-      cleaned.splice(i, 1);
-      continue;
-    }
-    break;
-  }
-  return cleaned;
+  return next;
 }

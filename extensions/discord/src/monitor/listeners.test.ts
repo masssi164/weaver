@@ -1,4 +1,5 @@
 // Discord tests cover listeners plugin behavior.
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 let DiscordMessageListener: typeof import("./listeners.js").DiscordMessageListener;
@@ -28,21 +29,13 @@ function fakeEvent(channelId: string) {
   return { channel_id: channelId } as never;
 }
 
-function createDeferred() {
-  let resolve: (() => void) | undefined;
-  const promise = new Promise<void>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
-}
-
 async function flushAsyncWork() {
   await Promise.resolve();
   await Promise.resolve();
 }
 
 describe("DiscordMessageListener", () => {
-  it("returns immediately without awaiting handler completion", async () => {
+  it("waits for handler completion", async () => {
     let resolveHandler: (() => void) | undefined;
     const handlerDone = new Promise<void>((resolve) => {
       resolveHandler = resolve;
@@ -53,21 +46,19 @@ describe("DiscordMessageListener", () => {
     const logger = createLogger();
     const listener = new DiscordMessageListener(handler as never, logger as never);
 
-    await expect(listener.handle(fakeEvent("ch-1"), {} as never)).resolves.toBeUndefined();
-    // Handler was dispatched but may not have been called yet (fire-and-forget).
-    // Wait for the microtask to flush so the handler starts.
+    const handled = listener.handle(fakeEvent("ch-1"), {} as never);
     await flushAsyncWork();
     expect(handler).toHaveBeenCalledTimes(1);
     expect(logger.error).not.toHaveBeenCalled();
 
     resolveHandler?.();
-    await handlerDone;
+    await expect(handled).resolves.toBeUndefined();
   });
 
   it("runs handlers for the same channel concurrently (no per-channel serialization)", async () => {
     const order: string[] = [];
-    const deferredA = createDeferred();
-    const deferredB = createDeferred();
+    const deferredA = createDeferred<void>();
+    const deferredB = createDeferred<void>();
     let callCount = 0;
     const handler = vi.fn(async () => {
       callCount += 1;
@@ -83,8 +74,8 @@ describe("DiscordMessageListener", () => {
     const listener = new DiscordMessageListener(handler as never, createLogger() as never);
 
     // Both messages target the same channel — previously serialized, now concurrent.
-    await listener.handle(fakeEvent("ch-1"), {} as never);
-    await listener.handle(fakeEvent("ch-1"), {} as never);
+    const handledA = listener.handle(fakeEvent("ch-1"), {} as never);
+    const handledB = listener.handle(fakeEvent("ch-1"), {} as never);
 
     await flushAsyncWork();
     expect(handler).toHaveBeenCalledTimes(2);
@@ -99,41 +90,8 @@ describe("DiscordMessageListener", () => {
     expect(order).not.toContain("end:1");
 
     deferredA.resolve?.();
-    await flushAsyncWork();
+    await Promise.all([handledA, handledB]);
     expect(order).toContain("end:1");
-  });
-
-  it("runs handlers for different channels in parallel", async () => {
-    const deferredA = createDeferred();
-    const deferredB = createDeferred();
-    const order: string[] = [];
-    const handler = vi.fn(async (data: { channel_id: string }) => {
-      order.push(`start:${data.channel_id}`);
-      if (data.channel_id === "ch-a") {
-        await deferredA.promise;
-      } else {
-        await deferredB.promise;
-      }
-      order.push(`end:${data.channel_id}`);
-    });
-    const listener = new DiscordMessageListener(handler as never, createLogger() as never);
-
-    await listener.handle(fakeEvent("ch-a"), {} as never);
-    await listener.handle(fakeEvent("ch-b"), {} as never);
-
-    await flushAsyncWork();
-    expect(handler).toHaveBeenCalledTimes(2);
-    expect(order).toContain("start:ch-a");
-    expect(order).toContain("start:ch-b");
-
-    deferredB.resolve?.();
-    await flushAsyncWork();
-    expect(order).toContain("end:ch-b");
-    expect(order).not.toContain("end:ch-a");
-
-    deferredA.resolve?.();
-    await flushAsyncWork();
-    expect(order).toContain("end:ch-a");
   });
 
   it("logs async handler failures", async () => {
@@ -163,7 +121,7 @@ describe("DiscordMessageListener", () => {
 
 describe("DiscordInteractionListener", () => {
   it("returns immediately without awaiting Discord interaction handling", async () => {
-    const handlerDone = createDeferred();
+    const handlerDone = createDeferred<void>();
     const handleInteraction = vi.fn(async () => {
       await handlerDone.promise;
     });

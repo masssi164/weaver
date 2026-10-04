@@ -1,6 +1,5 @@
-// Signal plugin module implements access policy behavior.
 import {
-  createChannelIngressResolver,
+  type ChannelIngressContextBinding,
   defineStableChannelIngressIdentity,
 } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
@@ -12,6 +11,7 @@ import {
   normalizeSignalAllowRecipient,
   type SignalSender,
 } from "../identity.js";
+import { getSignalRuntime } from "../runtime.js";
 
 type SignalDmPolicy = "open" | "pairing" | "allowlist" | "disabled";
 type SignalGroupPolicy = "open" | "allowlist" | "disabled";
@@ -97,11 +97,13 @@ const signalIngressIdentity = defineStableChannelIngressIdentity({
 });
 
 function signalSubjectInput(params: { sender: SignalSender; groupId?: string }) {
+  // signal-cli may learn a phone/UUID mapping after pairing. Keep both
+  // identifiers on the shared ingress subject or the existing entry stops matching.
   return {
     stableId: formatSignalSenderId(params.sender),
     aliases: {
-      phone: params.sender.kind === "phone" ? params.sender.e164 : undefined,
-      uuid: params.sender.kind === "uuid" ? params.sender.raw : undefined,
+      phone: params.sender.kind === "phone" ? params.sender.e164 : params.sender.aliases?.e164,
+      uuid: params.sender.kind === "uuid" ? params.sender.raw : params.sender.aliases?.uuid,
       group: params.groupId,
     },
   };
@@ -119,6 +121,7 @@ export async function resolveSignalAccessState(params: {
   cfg?: Pick<OpenClawConfig, "accessGroups" | "commands">;
   hasControlCommand?: boolean;
   readStoreAllowFrom?: () => Promise<string[]>;
+  contextBinding?: ChannelIngressContextBinding;
 }) {
   const isGroup = params.isGroup ?? params.groupId != null;
   const command =
@@ -128,7 +131,7 @@ export async function resolveSignalAccessState(params: {
           directGroupAllowFrom: "effective" as const,
         }
       : undefined;
-  const ingress = createChannelIngressResolver({
+  const ingress = getSignalRuntime().channel.inbound.ingress.createResolver({
     channelId: "signal",
     accountId: params.accountId,
     identity: signalIngressIdentity,
@@ -145,6 +148,7 @@ export async function resolveSignalAccessState(params: {
       kind: isGroup ? "group" : "direct",
       id: isGroup ? (params.groupId ?? "unknown") : params.sender.raw,
     },
+    contextBinding: params.contextBinding,
     ...(isGroup ? { event: { mayPair: false } } : {}),
     dmPolicy: params.dmPolicy,
     groupPolicy: params.groupPolicy,

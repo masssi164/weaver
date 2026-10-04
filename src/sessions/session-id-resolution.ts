@@ -1,4 +1,4 @@
-// Session id resolution helpers resolve user-provided session references.
+import { expectDefined } from "@openclaw/normalization-core";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { SessionEntry } from "../config/sessions.js";
 import { toAgentRequestSessionKey } from "../routing/session-key.js";
@@ -57,21 +57,17 @@ function normalizeSessionIdMatches(
 function collapseAliasMatches(matches: NormalizedSessionIdMatch[]): NormalizedSessionIdMatch[] {
   const grouped = new Map<string, NormalizedSessionIdMatch[]>();
   for (const match of matches) {
-    const bucket = grouped.get(match.normalizedRequestKey);
-    if (bucket) {
-      bucket.push(match);
-    } else {
-      grouped.set(match.normalizedRequestKey, [match]);
-    }
+    const group = grouped.get(match.normalizedRequestKey) ?? [];
+    group.push(match);
+    grouped.set(match.normalizedRequestKey, group);
   }
-
   return Array.from(grouped.values(), (group) => {
     if (group.length === 1) {
-      return group[0];
+      return expectDefined(group[0], "normalized session id match");
     }
     // Aliases that normalize to the same request key represent one session.
     // Prefer freshest canonical key so ambiguity only reports distinct sessions.
-    return [...group].toSorted((a, b) => {
+    const sorted = group.toSorted((a, b) => {
       const timeDiff = compareNormalizedUpdatedAtDescending(a, b);
       if (timeDiff !== 0) {
         return timeDiff;
@@ -80,7 +76,8 @@ function collapseAliasMatches(matches: NormalizedSessionIdMatch[]): NormalizedSe
         return a.isCanonicalSessionKey ? -1 : 1;
       }
       return compareStoreKeys(a.normalizedSessionKey, b.normalizedSessionKey);
-    })[0];
+    });
+    return expectDefined(sorted[0], "freshest normalized session id match");
   });
 }
 
@@ -90,7 +87,7 @@ function selectFreshestUniqueMatch(
   if (matches.length === 1) {
     return matches[0];
   }
-  const sortedMatches = [...matches].toSorted(compareNormalizedUpdatedAtDescending);
+  const sortedMatches = matches.toSorted(compareNormalizedUpdatedAtDescending);
   const [freshest, secondFreshest] = sortedMatches;
   if ((freshest?.entry?.updatedAt ?? 0) > (secondFreshest?.entry?.updatedAt ?? 0)) {
     return freshest;
@@ -112,7 +109,11 @@ export function resolveSessionIdMatchSelection(
     normalizeSessionIdMatches(matches, normalizeLowercaseStringOrEmpty(sessionId)),
   );
   if (canonicalMatches.length === 1) {
-    return { kind: "selected", sessionKey: canonicalMatches[0].sessionKey };
+    return {
+      kind: "selected",
+      sessionKey: expectDefined(canonicalMatches[0], "canonical matches capture group 0")
+        .sessionKey,
+    };
   }
 
   const structuralMatches = canonicalMatches.filter((match) => match.isStructural);

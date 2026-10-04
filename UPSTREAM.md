@@ -1,87 +1,55 @@
-# Upstream OpenClaw Reference
+# Upstream OpenClaw reference
 
-Weaver is a thin distribution of [OpenClaw](https://github.com/openclaw/openclaw), not an
-independent agent-runtime implementation.
+Weaver is a thin governed distribution, not a reimplementation of OpenClaw.
 
-## Pinned baseline
+## Exact candidate baseline
 
-| Field               | Value                                      |
-| ------------------- | ------------------------------------------ |
-| Upstream repository | `https://github.com/openclaw/openclaw`     |
-| Annotated release   | `v2026.7.1`                                |
-| Release commit      | `2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4` |
-| Release date        | 2026-07-13                                 |
-| License             | MIT                                        |
+- Repository: https://github.com/openclaw/openclaw
+- Stable release: `v2026.9.8`
+- Published: `2026-10-03T03:21:47Z`
+- Annotated tag object: `b1c1c6d3af1f68bc82efbb6c92fb224c36df8683`
+- Peeled commit: `fc23bc864e4553c2d215e479eeec47b67a0bf943`
+- Source tree: `92e461befd359758be6e2abde8ba80df2544653e`
+- GitHub tag-signature verification: `verified=true`, `reason=valid`
+- Upstream licence: MIT, with incorporated third-party notices retained.
 
-The baseline is recorded again in `weaver.fork-policy.json` so CI can verify the annotated tag,
-commit, review age, security-release lag, changed paths, and patch budget without relying on a
-moving branch.
+The candidate tree starts from this upstream tree and reapplies only the declared Weaver-owned
+files. It does not reuse the July runtime, dependency manifest, lockfile or generated upstream docs.
 
-## Inherited behavior
+## Preserved boundaries
 
-Unless a Weaver document explicitly narrows deployment policy, upstream OpenClaw owns and
-documents:
+The agent loop, models, official Matrix plugin, MCP client, sessions, native approvals, skills,
+memory, CLI, gateway and upstream security fixes come from the pinned release without core patches.
+The RuntimeProfile guard and all six existing Weaver seam tests are retained unchanged.
 
-- the agent loop and model/provider routing;
-- the official Matrix plugin and E2EE/device behavior;
-- the outbound MCP client registry and OAuth flow;
-- sessions, native approvals, workspace memory, and skills;
-- CLI, Gateway, plugin SDK, diagnostics, and release behavior.
+The three downstream root package-script aliases are removed. Use the direct equivalents in
+README and the operations guide. `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, runtime
+sources and upstream notices must match the pinned release exactly.
 
-The complete upstream documentation remains under `docs/` and is published at
-<https://docs.openclaw.ai>. Weaver-specific code must use public configuration, plugin, or process
-seams. It must not copy or fork these subsystems.
+No managed MCP capability is activated. Its current-domain/workload authorization proof remains
+an independent requirement even if upstream now offers more authentication capabilities.
 
-## Weaver-only delta
+## Review and verification
 
-The permitted distribution delta is deliberately small:
+The October 3 review covers the signed stable release metadata, current toolchain requirements,
+changed baseline, unchanged distribution guard, and the recovery/update changes documented in
+`CHANGELOG/2026.9.8.md`. It is not a claim that every upstream change since July was individually
+audited or that a production cell was migrated.
 
-- a Weaver-first repository entry point and operations/architecture documentation;
-- a fail-closed wrapper around a trusted RuntimeProfile verifier/projector;
-- a machine-readable fork policy and deterministic checker;
-- focused tests for those distribution seams.
+Admission requires current GitHub execution evidence for signature verification, fork bounds,
+the complete Weaver seam suite, production dependency audit and the upstream build. A date or
+upstream release alone is not sufficient evidence. See [Review scope](docs/weaver/upstream-review.md).
 
-No core patch is approved in the initial policy. A future core patch must name its owner, an
-upstream OpenClaw issue or pull request, a per-file line limit, and an objective removal criterion.
-Adding a plugin likewise requires an explicit policy entry; placing code under `extensions/` does
-not automatically exempt it from the fork budget.
+## Upgrade and rollback
 
-## Downstream automation
+1. Discover a published stable release and verify its exact annotated tag, peeled commit and provenance.
+2. Start from the new upstream tree; reapply only owned distribution files and refresh their documentation.
+3. Preserve the zero-core-patch rule and review all changed paths against the fork budget.
+4. Install the upstream lockfile and execute distribution, dependency and build checks.
+5. Require the existing ARC, live Matrix and reconstruction evidence before any deployment or readiness claim.
+6. Preserve the previous immutable runtime image and externally stored state generation. Do not roll an
+   older runtime onto state already migrated by a newer one; restore its matching generation instead.
 
-The inherited `Auto response`, `Labeler`, `OpenGrep — PR Diff`, and `OpenGrep — Full` workflows are
-disabled in the `masssi164/weaver` repository settings. The first pair requires OpenClaw-owned
-GitHub App credentials; the OpenGrep pair hard-codes Blacksmith runner labels that are not
-provisioned downstream. They are not Weaver build, security, or release evidence. Weaver neither
-copies those private keys nor rewrites upstream workflow bytes.
-
-`Weaver distribution / distribution-boundary` is the only downstream required check. It uses a
-GitHub-hosted runner and no product secrets, verifies the annotated upstream tag object and exact
-peeled commit through GitHub's signature-verification record, enforces the zero-core-patch budget,
-and runs the focused distribution tests. Other inherited workflows are informational unless a
-later reviewed policy explicitly adopts them. Inherited publishing, deployment, translation,
-external-service, and live-transport workflows are not Weaver release authority and remain
-unrequired; missing upstream credentials or unavailable runners never become a release waiver.
-Issue #37 owns the settings inventory and quarantine record.
-
-## Upgrade procedure
-
-1. Fetch and verify the candidate annotated OpenClaw stable-release tag and its release notes.
-2. Review upstream security advisories, Matrix/MCP/config changes, state-schema changes, and
-   runtime release evidence.
-3. Create the candidate branch from the peeled release commit, never by rebasing the previous
-   Weaver fork.
-4. Reapply only the permitted distribution files and update the pin plus security review in
-   `weaver.fork-policy.json`.
-5. Run the fork guard, focused distribution tests, upstream changed-surface checks, state inventory,
-   checkpoint migration/rollback, real Matrix, and cross-node reconstruction evidence.
-6. Promote only after the Agent Runtime Control conformance and release gates are green.
-
-An upstream version bump is not ready merely because it builds. Weaver must prove that an encrypted
-RuntimeState generation can be restored, migrated copy-on-write, checked with upstream health and
-doctor paths, and rolled back without reading the old cell filesystem.
-
-## Attribution
-
-The upstream copyright and MIT terms are preserved in [LICENSE](LICENSE). Third-party attribution
-is preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Weaver documentation describes
-downstream policy and does not imply endorsement by the OpenClaw Foundation.
+`main` remains unchanged until reviewed admission. No automatic deployment, release, security-limit
+relaxation or history rewrite is authorized by a passing candidate build. The recurring updater in
+issue #39 / PR #41 remains a separate follow-up; this change handles the explicitly requested update.

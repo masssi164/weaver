@@ -1,8 +1,3 @@
-/**
- * Configured binding matching helpers.
- *
- * Matches compiled binding rules against inbound conversations and materializes targets.
- */
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -31,19 +26,6 @@ export function resolveAccountMatchPriority(match: string | undefined, actual: s
     return 1;
   }
   return normalizeAccountId(trimmed) === actual ? 2 : 0;
-}
-
-function matchCompiledBindingConversation(params: {
-  rule: CompiledConfiguredBinding;
-  conversationId: string;
-  parentConversationId?: string;
-}): ChannelConfiguredBindingMatch | null {
-  return params.rule.provider.matchInboundConversation({
-    binding: params.rule.binding,
-    compiledBinding: params.rule.target,
-    conversationId: params.conversationId,
-    parentConversationId: params.parentConversationId,
-  });
 }
 
 /**
@@ -101,12 +83,10 @@ export function resolveMatchingConfiguredBinding(params: {
     return null;
   }
 
-  let wildcardMatch: {
-    rule: CompiledConfiguredBinding;
-    match: ChannelConfiguredBindingMatch;
-  } | null = null;
-  let exactMatch: { rule: CompiledConfiguredBinding; match: ChannelConfiguredBindingMatch } | null =
+  let bestMatch: { rule: CompiledConfiguredBinding; match: ChannelConfiguredBindingMatch } | null =
     null;
+  let bestAccountPriority = 0;
+  let bestMatchPriority = 0;
 
   for (const rule of params.rules) {
     const accountMatchPriority = resolveAccountMatchPriority(
@@ -118,8 +98,9 @@ export function resolveMatchingConfiguredBinding(params: {
     if (accountMatchPriority === 0) {
       continue;
     }
-    const match = matchCompiledBindingConversation({
-      rule,
+    const match = rule.provider.matchInboundConversation({
+      binding: rule.binding,
+      compiledBinding: rule.target,
       conversationId: params.conversation.conversationId,
       parentConversationId: params.conversation.parentConversationId,
     });
@@ -127,16 +108,16 @@ export function resolveMatchingConfiguredBinding(params: {
       continue;
     }
     const matchPriority = match.matchPriority ?? 0;
-    if (accountMatchPriority === 2) {
-      if (!exactMatch || matchPriority > (exactMatch.match.matchPriority ?? 0)) {
-        exactMatch = { rule, match };
-      }
-      continue;
-    }
-    if (!wildcardMatch || matchPriority > (wildcardMatch.match.matchPriority ?? 0)) {
-      wildcardMatch = { rule, match };
+    if (
+      !bestMatch ||
+      accountMatchPriority > bestAccountPriority ||
+      (accountMatchPriority === bestAccountPriority && matchPriority > bestMatchPriority)
+    ) {
+      bestMatch = { rule, match };
+      bestAccountPriority = accountMatchPriority;
+      bestMatchPriority = matchPriority;
     }
   }
 
-  return exactMatch ?? wildcardMatch;
+  return bestMatch;
 }

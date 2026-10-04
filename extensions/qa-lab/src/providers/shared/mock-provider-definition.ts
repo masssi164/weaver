@@ -1,4 +1,3 @@
-// Qa Lab provider module implements model/runtime integration.
 import { createMockProviderMap } from "./mock-model-config.js";
 import type { QaProviderDefinition, QaProviderMode } from "./types.js";
 
@@ -11,7 +10,7 @@ type MockQaProviderDefinitionParams = {
 };
 
 function mockModelRef(providerId: string, alternate?: boolean) {
-  return `${providerId}/${alternate ? "gpt-5.5-alt" : "gpt-5.5"}`;
+  return `${providerId}/${alternate ? "gpt-5.6-luna-alt" : "gpt-5.6-luna"}`;
 }
 
 export function createMockQaProviderDefinition(

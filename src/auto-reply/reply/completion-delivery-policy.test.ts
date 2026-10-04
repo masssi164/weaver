@@ -2,9 +2,15 @@
 import { describe, expect, it } from "vitest";
 import {
   completionRequiresMessageToolDelivery,
-  resolveCompletionChatType,
-  shouldRouteCompletionThroughRequesterSession,
+  resolveDurableCompletionDeliveryMode,
 } from "./completion-delivery-policy.js";
+
+const chatTypeProbeConfig = {
+  messages: {
+    visibleReplies: "message_tool",
+    groupChat: { visibleReplies: "automatic" },
+  },
+} as const;
 
 describe("completion delivery policy", () => {
   it.each([
@@ -33,17 +39,23 @@ describe("completion delivery policy", () => {
       requesterSessionKey: "agent:main:whatsapp:123@g.us",
       expected: "group",
     },
-  ])("infers $name", ({ requesterSessionKey, expected }) => {
-    expect(resolveCompletionChatType({ requesterSessionKey })).toBe(expected);
+  ])("applies the inferred $expected policy for $name", ({ requesterSessionKey, expected }) => {
+    expect(
+      completionRequiresMessageToolDelivery({
+        cfg: chatTypeProbeConfig,
+        requesterSessionKey,
+      }),
+    ).toBe(expected === "direct");
   });
 
   it("prefers explicit session chat type over key inference", () => {
     expect(
-      resolveCompletionChatType({
+      completionRequiresMessageToolDelivery({
+        cfg: chatTypeProbeConfig,
         requesterSessionKey: "agent:main:slack:channel:C123",
         requesterEntry: { chatType: "direct" },
       }),
-    ).toBe("direct");
+    ).toBe(true);
   });
 
   it.each([
@@ -55,11 +67,12 @@ describe("completion delivery policy", () => {
     { to: "user:U123", expected: "direct" },
   ] as const)("falls back to origin target prefix $to", ({ to, expected }) => {
     expect(
-      resolveCompletionChatType({
+      completionRequiresMessageToolDelivery({
+        cfg: chatTypeProbeConfig,
         requesterSessionKey: "agent:main:opaque:unknown-target",
         directOrigin: { channel: "test", to },
       }),
-    ).toBe(expected);
+    ).toBe(expected === "direct");
   });
 
   it("allows automatic delivery for group and channel completions by default", () => {
@@ -107,11 +120,8 @@ describe("completion delivery policy", () => {
     ).toBe(true);
   });
 
-  it("routes group and channel task completions through the requester session", () => {
-    expect(shouldRouteCompletionThroughRequesterSession("agent:main:whatsapp:123@g.us")).toBe(true);
-    expect(
-      shouldRouteCompletionThroughRequesterSession("agent:main:discord:guild-123:channel-456"),
-    ).toBe(true);
-    expect(shouldRouteCompletionThroughRequesterSession("agent:main:discord:dm:U123")).toBe(false);
+  it("uses host-owned explicit delivery for durable completions under message-tool policy", () => {
+    expect(resolveDurableCompletionDeliveryMode("message_tool_only")).toBe("host_owned");
+    expect(resolveDurableCompletionDeliveryMode("automatic")).toBe("automatic");
   });
 });

@@ -1,4 +1,3 @@
-// Discord plugin module implements channel access behavior.
 function readDiscordChannelPropertySafe(channel: unknown, key: string): unknown {
   if (!channel || typeof channel !== "object") {
     return undefined;
@@ -82,7 +81,7 @@ export function resolveDiscordChannelParentIdSafe(channel: unknown): string | un
   return resolveDiscordChannelStringWithAliasSafe(channel, "parentId");
 }
 
-export function resolveDiscordChannelOwnerIdSafe(channel: unknown): string | undefined {
+function resolveDiscordChannelOwnerIdSafe(channel: unknown): string | undefined {
   return resolveDiscordChannelStringWithAliasSafe(channel, "ownerId");
 }
 

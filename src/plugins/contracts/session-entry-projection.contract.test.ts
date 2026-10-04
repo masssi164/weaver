@@ -1,30 +1,30 @@
-// Session entry projection contract tests cover plugin session entry projection behavior.
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
   createPluginRegistryFixture,
   registerTestPlugin,
 } from "openclaw/plugin-sdk/plugin-test-contracts";
+// Session entry projection contract tests cover plugin session entry projection behavior.
+import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadSessionStore, updateSessionStore, type SessionEntry } from "../../config/sessions.js";
+import type { SessionEntry } from "../../config/sessions.js";
+import {
+  listSessionEntriesCore,
+  replaceSessionEntry,
+} from "../../config/sessions/session-accessor.js";
 import { withTempConfig } from "../../gateway/test-temp-config.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
 import { withEnvAsync } from "../../test-utils/env.js";
-import { cleanupReplacedPluginHostRegistry, runPluginHostCleanup } from "../host-hook-cleanup.js";
+import { createPluginHostRegistryRetirement, runPluginHostCleanup } from "../host-hook-cleanup.js";
 import { clearPluginHostRuntimeState } from "../host-hook-runtime.js";
 import { patchPluginSessionExtension } from "../host-hook-state.js";
 import type { PluginJsonValue } from "../host-hooks.js";
 import { createEmptyPluginRegistry } from "../registry-empty.js";
 import { setActivePluginRegistry } from "../runtime.js";
-import { createPluginRecord } from "../status.test-helpers.js";
+import { createPluginRecord } from "../status.test-fixtures.js";
 import { runTrustedToolPolicies } from "../trusted-tool-policy.js";
 
-function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object") {
-    throw new Error(`expected ${label}`);
-  }
-  return value as Record<string, unknown>;
-}
+const requireRecord = createRequireRecord("object", "expected-label");
 
 async function expectOkResult(promise: Promise<unknown>, label: string) {
   const result = requireRecord(await promise, label);
@@ -44,6 +44,29 @@ function extensionNamespace(entry: Record<string, unknown>, pluginId: string, na
   return requireRecord(pluginExtensions[namespace], `${pluginId}.${namespace} state`);
 }
 
+function loadSessionStore(
+  storePath: string,
+  _options?: { skipCache?: boolean },
+): Record<string, SessionEntry> {
+  return Object.fromEntries(
+    listSessionEntriesCore({ agentId: "main", storePath }).map(({ sessionKey, entry }) => [
+      sessionKey,
+      entry,
+    ]),
+  );
+}
+
+async function updateSessionStore(
+  storePath: string,
+  update: (store: Record<string, SessionEntry>) => void,
+): Promise<void> {
+  const store: Record<string, SessionEntry> = {};
+  update(store);
+  for (const [sessionKey, entry] of Object.entries(store)) {
+    await replaceSessionEntry({ sessionKey, storePath }, entry);
+  }
+}
+
 async function withProjectionSessionStore(
   prefix: string,
   run: (fixture: {
@@ -53,7 +76,10 @@ async function withProjectionSessionStore(
 ): Promise<void> {
   const stateDir = await fs.mkdtemp(path.join(resolvePreferredOpenClawTmpDir(), prefix));
   const storePath = path.join(stateDir, "sessions.json");
-  const tempConfig = { session: { store: storePath } };
+  const tempConfig = {
+    agents: { entries: { main: { default: true } } },
+    session: { store: storePath },
+  };
   try {
     return await withEnvAsync(
       { OPENCLAW_STATE_DIR: stateDir },
@@ -257,84 +283,78 @@ describe("plugin session extension SessionEntry projection", () => {
   });
 
   it("rejects sessionEntrySlotKey values that collide with SessionEntry fields", () => {
+    const reservedSlots = {
+      workflow: "updatedAt",
+      "main-recovery": "mainRestartRecovery",
+      recovery: "subagentRecovery",
+      "run-error": "lastRunError",
+      "transcript-path": "transcriptPath",
+      "custom-icon": "icon",
+      "context-window-source": "contextTokensSource",
+      "sandbox-policy": "sandbox",
+      "pending-final-text": "pendingFinalDeliveryText",
+      "completion-custody": "restartRecoveryHarnessCompletion",
+      "retired-execsecurity": "execSecurity",
+      "retired-execask": "execAsk",
+    };
     const { config, registry } = createPluginRegistryFixture();
     registerTestPlugin({
       registry,
       config,
       record: createPluginRecord({ id: "slot-collision", name: "Slot Collision" }),
       register(api) {
-        api.registerSessionExtension({
-          namespace: "workflow",
-          description: "bad slot",
-          sessionEntrySlotKey: "updatedAt",
-        });
-        api.registerSessionExtension({
-          namespace: "recovery",
-          description: "bad fresh-main slot",
-          sessionEntrySlotKey: "subagentRecovery",
-        });
+        for (const [namespace, sessionEntrySlotKey] of Object.entries(reservedSlots)) {
+          api.registerSessionExtension({
+            namespace,
+            description: "reserved session field",
+            sessionEntrySlotKey,
+          });
+        }
       },
     });
 
     expect(registry.registry.sessionExtensions).toHaveLength(0);
     expect(
       registry.registry.diagnostics.map(({ pluginId, message }) => ({ pluginId, message })),
-    ).toStrictEqual([
-      {
+    ).toStrictEqual(
+      Object.values(reservedSlots).map((slotKey) => ({
         pluginId: "slot-collision",
-        message: "sessionEntrySlotKey is reserved by SessionEntry: updatedAt",
-      },
-      {
-        pluginId: "slot-collision",
-        message: "sessionEntrySlotKey is reserved by SessionEntry: subagentRecovery",
-      },
-    ]);
+        message: `sessionEntrySlotKey is reserved by SessionEntry: ${slotKey}`,
+      })),
+    );
   });
 
   it("rejects sessionEntrySlotKey values inherited from Object.prototype", () => {
+    const reservedSlots = {
+      "to-string": "toString",
+      "has-own": "hasOwnProperty",
+      "value-of": "valueOf",
+    };
     const { config, registry } = createPluginRegistryFixture();
     registerTestPlugin({
       registry,
       config,
       record: createPluginRecord({ id: "object-slot-collision", name: "Object Slot Collision" }),
       register(api) {
-        api.registerSessionExtension({
-          namespace: "to-string",
-          description: "bad object slot",
-          sessionEntrySlotKey: "toString",
-        });
-        api.registerSessionExtension({
-          namespace: "has-own",
-          description: "bad object slot",
-          sessionEntrySlotKey: "hasOwnProperty",
-        });
-        api.registerSessionExtension({
-          namespace: "value-of",
-          description: "bad object slot",
-          sessionEntrySlotKey: "valueOf",
-        });
+        for (const [namespace, sessionEntrySlotKey] of Object.entries(reservedSlots)) {
+          api.registerSessionExtension({
+            namespace,
+            description: "bad object slot",
+            sessionEntrySlotKey,
+          });
+        }
       },
     });
 
     expect(registry.registry.sessionExtensions).toHaveLength(0);
-    const diagnostics = registry.registry.diagnostics.map(({ pluginId, message }) => ({
-      pluginId,
-      message,
-    }));
-    expect(diagnostics).toStrictEqual([
-      {
+    expect(
+      registry.registry.diagnostics.map(({ pluginId, message }) => ({ pluginId, message })),
+    ).toStrictEqual(
+      Object.values(reservedSlots).map((slotKey) => ({
         pluginId: "object-slot-collision",
-        message: "sessionEntrySlotKey is reserved by Object: toString",
-      },
-      {
-        pluginId: "object-slot-collision",
-        message: "sessionEntrySlotKey is reserved by Object: hasOwnProperty",
-      },
-      {
-        pluginId: "object-slot-collision",
-        message: "sessionEntrySlotKey is reserved by Object: valueOf",
-      },
-    ]);
+        message: `sessionEntrySlotKey is reserved by Object: ${slotKey}`,
+      })),
+    );
   });
 
   it("rejects duplicate promoted SessionEntry slot keys across registrations", () => {
@@ -545,11 +565,11 @@ describe("plugin session extension SessionEntry projection", () => {
         );
 
         await expectNoCleanupFailures(
-          cleanupReplacedPluginHostRegistry({
+          createPluginHostRegistryRetirement({
             cfg: tempConfig as never,
             previousRegistry: previousFixture.registry.registry,
             nextRegistry: nextFixture.registry.registry,
-          }),
+          })(),
           "restart cleanup result",
         );
 
@@ -635,11 +655,11 @@ describe("plugin session extension SessionEntry projection", () => {
         );
 
         await expectNoCleanupFailures(
-          cleanupReplacedPluginHostRegistry({
+          createPluginHostRegistryRetirement({
             cfg: tempConfig as never,
             previousRegistry: previousFixture.registry.registry,
             nextRegistry: nextFixture.registry.registry,
-          }),
+          })(),
           "mixed restart cleanup result",
         );
 
@@ -712,11 +732,11 @@ describe("plugin session extension SessionEntry projection", () => {
         );
 
         await expectNoCleanupFailures(
-          cleanupReplacedPluginHostRegistry({
+          createPluginHostRegistryRetirement({
             cfg: tempConfig as never,
             previousRegistry: previousFixture.registry.registry,
             nextRegistry: nextFixture.registry.registry,
-          }),
+          })(),
           "preserved restart cleanup result",
         );
 

@@ -1,10 +1,18 @@
 // Gh Read script supports OpenClaw repository automation.
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createPrivateKey, createSign } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { readBoundedResponseText } from "./lib/bounded-response.ts";
+import { readSecretFileSync } from "@openclaw/fs-safe/secret";
+import { expectDefined } from "../packages/normalization-core/src/expect.js";
+import { truncateUtf16Safe } from "../packages/normalization-core/src/utf16-slice.js";
+import { cancelResponseReaderSoon, readBoundedResponseText } from "./lib/bounded-response.mjs";
 import { parseStrictIntegerOption } from "./lib/dev-tooling-safety.ts";
+import {
+  normalizeGitHubRepo as normalizeRepo,
+  resolveGitHubRepoFromOrigin,
+} from "./lib/github-repo.ts";
+
+export { normalizeRepo };
 
 const APP_ID_ENV = "OPENCLAW_GH_READ_APP_ID";
 const KEY_FILE_ENV = "OPENCLAW_GH_READ_PRIVATE_KEY_FILE";
@@ -14,6 +22,7 @@ const API_VERSION = "2022-11-28";
 const DEFAULT_GITHUB_FETCH_TIMEOUT_MS = 30_000;
 const GITHUB_ERROR_BODY_MAX_CHARS = 4096;
 const GITHUB_JSON_BODY_MAX_BYTES = 1024 * 1024;
+const GITHUB_APP_PRIVATE_KEY_MAX_BYTES = 64 * 1024;
 const DEFAULT_READ_PERMISSION_KEYS = [
   "actions",
   "checks",
@@ -50,7 +59,7 @@ type GitHubBodyReadOptions = {
 
 export function parseRepoArg(args: string[]): string | null {
   for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
+    const arg = expectDefined(args[i], `GitHub CLI argument at index ${i}`);
     if (arg === "-R" || arg === "--repo") {
       return normalizeRepo(args[i + 1] ?? null);
     }
@@ -62,23 +71,6 @@ export function parseRepoArg(args: string[]): string | null {
     }
   }
   return null;
-}
-
-export function normalizeRepo(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const withoutProtocol = trimmed.replace(/^[a-z]+:\/\//i, "");
-  const withoutHost = withoutProtocol.replace(/^(?:[^@/]+@)?github\.com[:/]/i, "");
-  const normalized = withoutHost.replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
-  const parts = normalized.split("/").filter(Boolean);
-  if (parts.length < 2) {
-    return null;
-  }
-
-  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
 }
 
 export function parsePermissionKeys(raw: string | null | undefined): string[] {
@@ -146,34 +138,24 @@ function resolveRepo(args: string[]): string | null {
   }
 
   try {
-    const remote = execFileSync("git", ["config", "--get", "remote.origin.url"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return normalizeRepo(remote);
+    return resolveGitHubRepoFromOrigin();
   } catch {
     return null;
   }
 }
 
-function base64UrlEncode(value: string | Uint8Array) {
-  return Buffer.from(value)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
 function createAppJwt(appId: string, privateKeyPem: string) {
   const now = Math.floor(Date.now() / 1000);
-  const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const payload = base64UrlEncode(JSON.stringify({ iat: now - 60, exp: now + 9 * 60, iss: appId }));
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ iat: now - 60, exp: now + 9 * 60, iss: appId }),
+  ).toString("base64url");
   const signingInput = `${header}.${payload}`;
   const signer = createSign("RSA-SHA256");
   signer.update(signingInput);
   signer.end();
   const signature = signer.sign(createPrivateKey(privateKeyPem));
-  return `${signingInput}.${base64UrlEncode(signature)}`;
+  return `${signingInput}.${signature.toString("base64url")}`;
 }
 
 async function withGitHubFetchTimeout<T>(
@@ -191,18 +173,12 @@ async function withGitHubFetchTimeout<T>(
     }, timeoutMs);
   });
   try {
-    return await Promise.race([run(controller.signal), timeoutPromise]);
+    return await Promise.race([run(controller.signal, timeoutPromise), timeoutPromise]);
   } finally {
     if (timeout) {
       clearTimeout(timeout);
     }
   }
-}
-
-function cancelReaderSoon(reader: ReadableStreamDefaultReader<Uint8Array>): void {
-  void Promise.resolve()
-    .then(() => reader.cancel())
-    .catch(() => undefined);
 }
 
 async function readGitHubErrorChunk(
@@ -218,7 +194,7 @@ async function readGitHubErrorChunk(
     read,
     timeoutPromise.catch((error: unknown) => {
       markCanceled();
-      cancelReaderSoon(reader);
+      cancelResponseReaderSoon(reader);
       throw error;
     }),
   ]);
@@ -251,7 +227,7 @@ export async function readBoundedGitHubErrorText(
 
       text += decoder.decode(value, { stream: true });
       if (text.length > maxChars) {
-        text = text.slice(0, maxChars);
+        text = truncateUtf16Safe(text, maxChars);
         truncated = true;
         break;
       }
@@ -273,7 +249,7 @@ export async function readBoundedGitHubJson<T>(
   options: GitHubBodyReadOptions = {},
 ): Promise<T> {
   const text = await readBoundedResponseText(response, "GitHub API", maxBytes, {
-    createTooLargeError: (message) =>
+    createTooLargeError: (message: string) =>
       Object.assign(new Error(message), {
         code: "ETOOBIG",
       }),
@@ -332,10 +308,9 @@ async function resolveInstallation(
   if (installationId) {
     return githubJson<InstallationResponse>(`/app/installations/${installationId}`, appJwt);
   }
-  fail(
+  return fail(
     `missing repo context; pass -R owner/repo, set GH_REPO, or set ${INSTALLATION_ID_ENV} for a direct installation lookup`,
   );
-  throw new Error("unreachable");
 }
 
 async function createInstallationToken(
@@ -366,6 +341,13 @@ async function createInstallationToken(
   return tokenResponse.token;
 }
 
+export function readGitHubAppPrivateKey(filePath: string): string {
+  return readSecretFileSync(filePath, "GitHub App private key", {
+    maxBytes: GITHUB_APP_PRIVATE_KEY_MAX_BYTES,
+    rejectHardlinks: false,
+  });
+}
+
 async function main() {
   if (process.argv.length <= 2) {
     fail(
@@ -376,7 +358,7 @@ async function main() {
   const ghArgs = process.argv.slice(2);
   const appId = readRequiredEnv(APP_ID_ENV);
   const privateKeyPath = readRequiredEnv(KEY_FILE_ENV);
-  const privateKeyPem = readFileSync(privateKeyPath, "utf8");
+  const privateKeyPem = readGitHubAppPrivateKey(privateKeyPath);
   const repo = resolveRepo(ghArgs);
   const appJwt = createAppJwt(appId, privateKeyPem);
   const installation = await resolveInstallation(appJwt, repo);

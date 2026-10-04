@@ -5,7 +5,13 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage, toErrorObject } from "../../infra/errors.js";
 import type { AcpRuntimeError } from "../runtime/errors.js";
+import type { AcpSessionControlBinding } from "../runtime/session-control-owner.js";
 import type { ManagerRuntimeHandleCache } from "./manager.runtime-handle-cache.js";
+import {
+  assertAcpRuntimeOwnerSupport,
+  isAcpOwnerRepairRequired,
+  persistedAcpRuntimeHandle,
+} from "./manager.runtime-owner.js";
 import type {
   AcpSessionManagerDeps,
   SessionAcpMeta,
@@ -41,23 +47,32 @@ function isRecoverableMissingManagerPersistentSessionError(error: AcpRuntimeErro
   return false;
 }
 
-/** Prepares a one-time fresh-handle retry for recoverable pre-output runtime failures. */
+/** Prepares a one-time fresh-handle retry only before authoritative prompt submission. */
 export async function prepareFreshManagerRuntimeHandleRetry(params: {
   attempt: number;
   cfg: OpenClawConfig;
   sessionKey: string;
+  agentId: string;
   error: AcpRuntimeError;
+  promptStarted: boolean;
   sawTurnOutput: boolean;
   runtime?: AcpRuntime;
   meta?: SessionAcpMeta;
   runtimeHandles: ManagerRuntimeHandleCache;
   writeSessionMeta: WriteManagerSessionMeta;
+  isCurrentActor: () => boolean;
 }): Promise<boolean> {
-  if (params.attempt > 0 || params.sawTurnOutput) {
+  if (
+    !params.isCurrentActor() ||
+    isAcpOwnerRepairRequired(params.error) ||
+    params.attempt > 0 ||
+    params.promptStarted ||
+    params.sawTurnOutput
+  ) {
     return false;
   }
   if (isRecoverableManagerAcpxExitError(params.error.message)) {
-    params.runtimeHandles.clear(params.sessionKey);
+    params.runtimeHandles.clear(params);
     logVerbose(
       `acp-manager: retrying ${params.sessionKey} with a fresh runtime handle after early turn failure: ${params.error.message}`,
     );
@@ -71,27 +86,40 @@ export async function prepareFreshManagerRuntimeHandleRetry(params: {
   ) {
     return false;
   }
-  const cleared = await clearPersistedRuntimeResumeState({
-    cfg: params.cfg,
-    sessionKey: params.sessionKey,
-    writeSessionMeta: params.writeSessionMeta,
-  });
-  if (!cleared) {
-    return false;
-  }
   if (params.runtime.prepareFreshSession) {
+    if (!params.isCurrentActor()) {
+      return false;
+    }
     try {
       await params.runtime.prepareFreshSession({
+        persistedHandle: persistedAcpRuntimeHandle(params, params.meta),
         sessionKey: params.sessionKey,
+        agentId: params.agentId,
       });
+      if (!params.isCurrentActor()) {
+        return false;
+      }
     } catch (error) {
+      if (isAcpOwnerRepairRequired(error)) {
+        throw error;
+      }
       logVerbose(
         `acp-manager: failed preparing a fresh persistent session for ${params.sessionKey}: ${formatErrorMessage(error)}`,
       );
       return false;
     }
   }
-  params.runtimeHandles.clear(params.sessionKey);
+  const cleared = await clearPersistedRuntimeResumeState({
+    cfg: params.cfg,
+    sessionKey: params.sessionKey,
+    agentId: params.agentId,
+    writeSessionMeta: params.writeSessionMeta,
+    isCurrentActor: params.isCurrentActor,
+  });
+  if (!cleared || !params.isCurrentActor()) {
+    return false;
+  }
+  params.runtimeHandles.clear(params);
   logVerbose(
     `acp-manager: retrying ${params.sessionKey} with a fresh persistent session after missing backend resume target: ${params.error.message}`,
   );
@@ -99,74 +127,38 @@ export async function prepareFreshManagerRuntimeHandleRetry(params: {
 }
 
 async function clearPersistedRuntimeResumeState(params: {
+  assertCommitAllowed?: () => void;
+  expectedControlBinding?: AcpSessionControlBinding;
   cfg: OpenClawConfig;
   sessionKey: string;
+  agentId: string;
   writeSessionMeta: WriteManagerSessionMeta;
+  isCurrentActor: () => boolean;
+  discardPersistentState?: boolean;
 }): Promise<boolean> {
   const now = Date.now();
   const updated = await params.writeSessionMeta({
+    assertCommitAllowed: params.assertCommitAllowed,
+    expectedControlBinding: params.expectedControlBinding,
     cfg: params.cfg,
     sessionKey: params.sessionKey,
+    agentId: params.agentId,
+    isCurrentActor: params.isCurrentActor,
     mutate: (current, entry) => {
-      if (!entry) {
+      if (!params.isCurrentActor()) {
+        return undefined;
+      }
+      if (!entry || !current) {
         return null;
       }
-      const base = current;
-      if (!base) {
-        return null;
+      const currentIdentity = resolveSessionIdentityFromMeta(current);
+      if (
+        !params.discardPersistentState &&
+        !currentIdentity?.acpxSessionId &&
+        !currentIdentity?.agentSessionId
+      ) {
+        return current;
       }
-      const currentIdentity = resolveSessionIdentityFromMeta(base);
-      if (!currentIdentity?.acpxSessionId && !currentIdentity?.agentSessionId) {
-        return base;
-      }
-      const nextIdentity = {
-        state: "pending" as const,
-        ...(currentIdentity.acpxRecordId ? { acpxRecordId: currentIdentity.acpxRecordId } : {}),
-        source: currentIdentity.source,
-        lastUpdatedAt: now,
-      };
-      return {
-        backend: base.backend,
-        agent: base.agent,
-        runtimeSessionName: base.runtimeSessionName,
-        identity: nextIdentity,
-        mode: base.mode,
-        ...(base.runtimeOptions ? { runtimeOptions: base.runtimeOptions } : {}),
-        ...(base.cwd ? { cwd: base.cwd } : {}),
-        state: base.state,
-        lastActivityAt: now,
-        ...(base.lastError ? { lastError: base.lastError } : {}),
-      };
-    },
-  });
-  if (!updated) {
-    logVerbose(
-      `acp-manager: unable to clear persisted runtime resume state for ${params.sessionKey}`,
-    );
-    return false;
-  }
-  return true;
-}
-
-/** Clears persisted runtime resume identifiers while preserving the manager session shell. */
-export async function discardPersistedManagerRuntimeState(params: {
-  cfg: OpenClawConfig;
-  sessionKey: string;
-  writeSessionMeta: WriteManagerSessionMeta;
-}): Promise<void> {
-  const now = Date.now();
-  await params.writeSessionMeta({
-    cfg: params.cfg,
-    sessionKey: params.sessionKey,
-    mutate: (current, entry) => {
-      if (!entry) {
-        return null;
-      }
-      const base = current;
-      if (!base) {
-        return null;
-      }
-      const currentIdentity = resolveSessionIdentityFromMeta(base);
       const nextIdentity = currentIdentity
         ? {
             state: "pending" as const,
@@ -176,26 +168,58 @@ export async function discardPersistedManagerRuntimeState(params: {
           }
         : undefined;
       return {
-        backend: base.backend,
-        agent: base.agent,
-        runtimeSessionName: base.runtimeSessionName,
+        backend: current.backend,
+        agent: current.agent,
+        runtimeSessionName: current.runtimeSessionName,
         ...(nextIdentity ? { identity: nextIdentity } : {}),
-        mode: base.mode,
-        ...(base.runtimeOptions ? { runtimeOptions: base.runtimeOptions } : {}),
-        ...(base.cwd ? { cwd: base.cwd } : {}),
-        state: "idle",
+        mode: current.mode,
+        ...(current.runtimeOptions ? { runtimeOptions: current.runtimeOptions } : {}),
+        ...(current.cwd ? { cwd: current.cwd } : {}),
+        state: params.discardPersistentState ? "idle" : current.state,
         lastActivityAt: now,
+        ...(!params.discardPersistentState && current.lastError
+          ? { lastError: current.lastError }
+          : {}),
       };
     },
-    failOnError: true,
+    ...(params.discardPersistentState ? { failOnError: true } : {}),
   });
+  if (!updated) {
+    if (!params.discardPersistentState) {
+      logVerbose(
+        `acp-manager: unable to clear persisted runtime resume state for ${params.sessionKey}`,
+      );
+    }
+    return false;
+  }
+  return true;
 }
 
+/** Clears persisted runtime resume identifiers while preserving the manager session shell. */
+export async function discardPersistedManagerRuntimeState(params: {
+  assertCommitAllowed?: () => void;
+  expectedControlBinding?: AcpSessionControlBinding;
+  cfg: OpenClawConfig;
+  sessionKey: string;
+  agentId: string;
+  writeSessionMeta: WriteManagerSessionMeta;
+  isCurrentActor: () => boolean;
+}): Promise<void> {
+  await clearPersistedRuntimeResumeState({ ...params, discardPersistentState: true });
+}
+
+/**
+ * Best-effort fresh-session preparation against a maybe-missing backend.
+ * Every non-applied path records why it was skipped: a reset that silently
+ * skips this step looks successful while the backend keeps resuming the old
+ * conversation, which is the worst failure mode for session resets.
+ */
 export async function tryPrepareFreshManagerRuntimeSession(params: {
   deps: Pick<AcpSessionManagerDeps, "getRuntimeBackend">;
   cfg: OpenClawConfig;
   meta: SessionAcpMeta;
   sessionKey: string;
+  agentId: string;
   logPrefix: string;
   missingBackendError?: unknown;
 }): Promise<void> {
@@ -206,12 +230,27 @@ export async function tryPrepareFreshManagerRuntimeSession(params: {
       if (params.missingBackendError) {
         throw toErrorObject(params.missingBackendError, "Non-Error thrown");
       }
+      logVerbose(
+        `${params.logPrefix}: fresh-session preparation skipped for ${params.sessionKey}: ACP backend "${configuredBackend || "(default)"}" is not registered`,
+      );
       return;
     }
-    await backend.runtime.prepareFreshSession?.({
+    assertAcpRuntimeOwnerSupport(backend.runtime, params);
+    if (!backend.runtime.prepareFreshSession) {
+      logVerbose(
+        `${params.logPrefix}: fresh-session preparation skipped for ${params.sessionKey}: ACP backend "${backend.id}" does not support prepareFreshSession`,
+      );
+      return;
+    }
+    await backend.runtime.prepareFreshSession({
+      persistedHandle: persistedAcpRuntimeHandle(params, params.meta),
       sessionKey: params.sessionKey,
+      agentId: params.agentId,
     });
   } catch (error) {
+    if (isAcpOwnerRepairRequired(error)) {
+      throw error;
+    }
     logVerbose(
       `${params.logPrefix}: unable to prepare fresh session for ${params.sessionKey}: ${formatErrorMessage(error)}`,
     );

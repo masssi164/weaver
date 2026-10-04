@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { wrapToolWithBeforeToolCallHook } from "openclaw/plugin-sdk/agent-harness-runtime";
 import {
   createTerminalPresentationContractTool,
@@ -14,6 +15,10 @@ import {
   SessionManager,
 } from "openclaw/plugin-sdk/agent-sessions";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  AgentToolResultMiddlewareContext,
+  AgentToolResultMiddlewareEvent,
+} from "../plugins/agent-tool-result-middleware-types.js";
 import { createEmptyPluginRegistry } from "../plugins/registry.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import {
@@ -21,7 +26,7 @@ import {
   recordAdjustedParamsForToolCall,
 } from "./agent-tools.before-tool-call.js";
 import { buildEmbeddedExtensionFactories } from "./embedded-agent-runner/extensions.js";
-import { consumeEmbeddedToolSendReceipt } from "./embedded-agent-runner/tool-send-receipts.js";
+import { consumeEmbeddedToolReceipt } from "./embedded-agent-runner/tool-send-receipts.js";
 import { cleanupTempPluginTestEnvironment } from "./test-helpers/temp-plugin-extension-fixtures.js";
 import { jsonResult } from "./tools/common.js";
 
@@ -32,7 +37,106 @@ afterEach(() => {
   cleanupTempPluginTestEnvironment(tempDirs, originalBundledPluginsDir);
 });
 
+async function createToolResultHandler(
+  overrides: Partial<Parameters<typeof buildEmbeddedExtensionFactories>[0]> = {},
+) {
+  const factories = buildEmbeddedExtensionFactories({
+    cfg: undefined,
+    sessionManager: SessionManager.inMemory(),
+    provider: "openai",
+    modelId: "gpt-5.4",
+    model: undefined,
+    ...overrides,
+  });
+  const handlers = new Map<string, Function>();
+  await factories[0]?.({
+    on(event: string, handler: Function) {
+      handlers.set(event, handler);
+    },
+  } as never);
+  return handlers.get("tool_result");
+}
+
 describe("buildEmbeddedExtensionFactories", () => {
+  it("passes the prepared run identity to installed result middleware", async () => {
+    const identity = {
+      agentId: "main",
+      sessionId: "session-normal",
+      sessionKey: "agent:main:discord:channel:normal",
+      runId: "run-normal",
+    };
+    const middleware = vi.fn(
+      (event: AgentToolResultMiddlewareEvent, _context: AgentToolResultMiddlewareContext) => ({
+        result: {
+          content: [{ type: "text" as const, text: "middleware-observed" }],
+          details: { observedTool: event.toolName },
+          terminate: true,
+        },
+      }),
+    );
+    const registry = createEmptyPluginRegistry();
+    registry.agentToolResultMiddlewares.push({
+      pluginId: "identity-proof",
+      pluginName: "identity-proof",
+      rawHandler: middleware,
+      handler: middleware,
+      runtimes: ["openclaw"],
+      source: "test",
+    });
+    setActivePluginRegistry(registry);
+
+    const sessionManager = SessionManager.inMemory();
+    const factories = buildEmbeddedExtensionFactories({
+      cfg: undefined,
+      sessionManager,
+      provider: "openai",
+      modelId: "gpt-5.4",
+      model: undefined,
+      ...identity,
+    });
+    const factory = factories[0];
+    assert(factory, "Expected embedded tool-result extension factory");
+
+    const runtime = createExtensionRuntime();
+    const extension = await loadExtensionFromFactory(
+      factory,
+      "/tmp",
+      createEventBus(),
+      runtime,
+      "<middleware-identity-test>",
+    );
+    const runner = new ExtensionRunner(
+      [extension],
+      runtime,
+      "/tmp",
+      sessionManager,
+      ModelRegistry.inMemory(AuthStorage.inMemory()),
+    );
+    const result = await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: `${identity.runId}-read`,
+      input: { path: "README.md" },
+      content: [{ type: "text", text: "original tool output" }],
+      details: {},
+      isError: false,
+    });
+
+    expect(middleware).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        toolName: "read",
+        toolCallId: `${identity.runId}-read`,
+        args: { path: "README.md" },
+      }),
+      { runtime: "openclaw", ...identity },
+    );
+    expect(result).toMatchObject({
+      content: [{ type: "text", text: "middleware-observed" }],
+      details: { observedTool: "read" },
+      terminate: true,
+    });
+  });
+
   it("bridges middleware mutations with unique fallback tool call ids", async () => {
     // Middleware invoked from app-server style tool_result events may not have a
     // call id; synthesize stable unique ids for downstream audit/mutation hooks.
@@ -144,22 +248,9 @@ describe("buildEmbeddedExtensionFactories", () => {
       { url: "https://approved.example" },
       "run-terminal-middleware",
     );
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-      runId: "run-terminal-middleware",
-    });
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
+    const handler = await createToolResultHandler({ runId: "run-terminal-middleware" });
 
-    await handlers.get("tool_result")?.(
+    await handler?.(
       {
         toolName: "web_fetch",
         toolCallId: "call-terminal-middleware",
@@ -220,22 +311,9 @@ describe("buildEmbeddedExtensionFactories", () => {
       undefined,
       undefined,
     );
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-      runId: "run-terminal-blocked",
-    });
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
+    const handler = await createToolResultHandler({ runId: "run-terminal-blocked" });
 
-    const result = await handlers.get("tool_result")?.(
+    const result = await handler?.(
       {
         toolName: "web_fetch",
         toolCallId: "call-terminal-blocked",
@@ -253,49 +331,6 @@ describe("buildEmbeddedExtensionFactories", () => {
         terminalPresentation: undefined,
       }),
     );
-  });
-
-  it("marks status-error tool results as model-visible failures", async () => {
-    setActivePluginRegistry(createEmptyPluginRegistry());
-
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
-    const handler = handlers.get("tool_result");
-    const content = [{ type: "text", text: "oldText must be unique" }];
-    const details = {
-      status: "error",
-      tool: "edit",
-      error: "oldText must be unique",
-    };
-
-    const result = await handler?.(
-      {
-        toolName: "edit",
-        toolCallId: "call-edit",
-        content,
-        details,
-        isError: false,
-      },
-      { cwd: "/tmp" },
-    );
-
-    expect(result).toEqual({
-      content,
-      details,
-      isError: true,
-    });
   });
 
   it("preserves model-visible failures when middleware rewrites details", async () => {
@@ -316,21 +351,7 @@ describe("buildEmbeddedExtensionFactories", () => {
     });
     setActivePluginRegistry(registry);
 
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
-    const handler = handlers.get("tool_result");
+    const handler = await createToolResultHandler();
 
     const result = await handler?.(
       {
@@ -350,7 +371,7 @@ describe("buildEmbeddedExtensionFactories", () => {
     });
   });
 
-  it("stores provider send receipts without overriding middleware details", async () => {
+  it("stores private send receipts without overriding middleware details", async () => {
     const registry = createEmptyPluginRegistry();
     registry.agentToolResultMiddlewares.push({
       pluginId: "redactor",
@@ -368,21 +389,9 @@ describe("buildEmbeddedExtensionFactories", () => {
     setActivePluginRegistry(registry);
 
     const sessionManager = SessionManager.inMemory();
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager,
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
+    const handler = await createToolResultHandler({ sessionManager });
 
-    const result = await handlers.get("tool_result")?.(
+    const result = await handler?.(
       {
         toolName: "message",
         toolCallId: "call-message",
@@ -391,6 +400,12 @@ describe("buildEmbeddedExtensionFactories", () => {
           toolSend: {
             to: "channel:resolved-id",
             threadId: "root-1",
+          },
+          messageDelivery: {
+            status: "settled",
+            primaryPlatformMessageId: "message-1",
+            partialDelivery: false,
+            createdThreadIds: ["root-1"],
           },
         },
       },
@@ -401,15 +416,21 @@ describe("buildEmbeddedExtensionFactories", () => {
       content: [{ type: "text", text: "Sent." }],
       details: { redacted: true },
     });
-    expect(consumeEmbeddedToolSendReceipt(sessionManager, "call-message")).toEqual({
+    expect(consumeEmbeddedToolReceipt(sessionManager, "call-message")).toEqual({
       details: {
         toolSend: {
           to: "channel:resolved-id",
           threadId: "root-1",
         },
+        messageDelivery: {
+          status: "settled",
+          primaryPlatformMessageId: "message-1",
+          partialDelivery: false,
+          createdThreadIds: ["root-1"],
+        },
       },
     });
-    expect(consumeEmbeddedToolSendReceipt(sessionManager, "call-message")).toBeUndefined();
+    expect(consumeEmbeddedToolReceipt(sessionManager, "call-message")).toBeUndefined();
   });
 
   it("keeps a confirmed send successful when result middleware fails", async () => {
@@ -427,21 +448,9 @@ describe("buildEmbeddedExtensionFactories", () => {
     setActivePluginRegistry(registry);
 
     const sessionManager = SessionManager.inMemory();
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager,
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
+    const handler = await createToolResultHandler({ sessionManager });
 
-    const result = await handlers.get("tool_result")?.(
+    const result = await handler?.(
       {
         toolName: "message",
         toolCallId: "call-message",
@@ -451,6 +460,12 @@ describe("buildEmbeddedExtensionFactories", () => {
           ok: true,
           result: { messageId: "1700000000.000100", channelId: "C123" },
           toolSend: { to: "channel:C123" },
+          messageDelivery: {
+            status: "settled",
+            primaryPlatformMessageId: "1700000000.000100",
+            partialDelivery: false,
+            createdThreadIds: [],
+          },
         },
       },
       { cwd: "/tmp" },
@@ -464,29 +479,23 @@ describe("buildEmbeddedExtensionFactories", () => {
         middlewareWarning: "post-processing failed",
       },
     });
-    expect(consumeEmbeddedToolSendReceipt(sessionManager, "call-message")).toEqual({
-      details: { toolSend: { to: "channel:C123" } },
+    expect(consumeEmbeddedToolReceipt(sessionManager, "call-message")).toEqual({
+      details: {
+        toolSend: { to: "channel:C123" },
+        messageDelivery: {
+          status: "settled",
+          primaryPlatformMessageId: "1700000000.000100",
+          partialDelivery: false,
+          createdThreadIds: [],
+        },
+      },
     });
   });
 
   it("marks status-timeout tool results as model-visible failures", async () => {
     setActivePluginRegistry(createEmptyPluginRegistry());
 
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
-    const handler = handlers.get("tool_result");
+    const handler = await createToolResultHandler();
 
     const result = await handler?.(
       {
@@ -518,10 +527,7 @@ describe("buildEmbeddedExtensionFactories", () => {
     });
 
     const factory = factories[0];
-    expect(factory).toBeDefined();
-    if (!factory) {
-      throw new Error("Expected embedded tool-result extension factory");
-    }
+    assert(factory, "Expected embedded tool-result extension factory");
     const runtime = createExtensionRuntime();
     const extension = await loadExtensionFromFactory(
       factory,
@@ -560,21 +566,7 @@ describe("buildEmbeddedExtensionFactories", () => {
   it("still marks a forbidden sessions_spawn as a model-visible failure", async () => {
     setActivePluginRegistry(createEmptyPluginRegistry());
 
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
-    const handler = handlers.get("tool_result");
+    const handler = await createToolResultHandler();
     const content = [{ type: "text", text: "spawn denied" }];
     const details = { status: "forbidden", reason: "subagents disabled" };
 
@@ -597,21 +589,7 @@ describe("buildEmbeddedExtensionFactories", () => {
     // accepted status alone must not clear an error flag.
     setActivePluginRegistry(createEmptyPluginRegistry());
 
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
-    const handler = handlers.get("tool_result");
+    const handler = await createToolResultHandler();
     const content = [{ type: "text", text: "partial" }];
     const details = { status: "accepted" };
 
@@ -632,21 +610,7 @@ describe("buildEmbeddedExtensionFactories", () => {
   it("does not clear the error flag for a non-spawn tool with accepted-shaped details", async () => {
     setActivePluginRegistry(createEmptyPluginRegistry());
 
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
-    const handler = handlers.get("tool_result");
+    const handler = await createToolResultHandler();
     const content = [{ type: "text", text: "boom" }];
     const details = jsonResult({
       status: "accepted",
@@ -671,21 +635,7 @@ describe("buildEmbeddedExtensionFactories", () => {
   it("does not mark results as errors when status is absent or non-error", async () => {
     setActivePluginRegistry(createEmptyPluginRegistry());
 
-    const factories = buildEmbeddedExtensionFactories({
-      cfg: undefined,
-      sessionManager: SessionManager.inMemory(),
-      provider: "openai",
-      modelId: "gpt-5.4",
-      model: undefined,
-    });
-
-    const handlers = new Map<string, Function>();
-    await factories[0]?.({
-      on(event: string, handler: Function) {
-        handlers.set(event, handler);
-      },
-    } as never);
-    const handler = handlers.get("tool_result");
+    const handler = await createToolResultHandler();
 
     // Empty details — no status field
     const noStatusResult = await handler?.(

@@ -1,15 +1,16 @@
-// Discord plugin module implements handle action.guild admin behavior.
 import type { AgentToolResult } from "openclaw/plugin-sdk/agent-core";
+import { readBooleanParam } from "openclaw/plugin-sdk/boolean-param";
+import type { ChannelMessageActionContext } from "openclaw/plugin-sdk/channel-contract";
 import {
   readNonNegativeIntegerParam,
   readPositiveIntegerParam,
   readStringArrayParam,
   readStringParam,
-} from "openclaw/plugin-sdk/agent-runtime";
-import type { ChannelMessageActionContext } from "openclaw/plugin-sdk/channel-contract";
+} from "openclaw/plugin-sdk/param-readers";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { handleDiscordAction } from "../../action-runtime-api.js";
 import { isTrustedRequesterGuildAdminAction } from "../trusted-requester-actions.js";
+import type { DiscordMessagingActionOptions } from "./runtime.messaging.shared.js";
 import {
   isDiscordModerationAction,
   readDiscordModerationCommand,
@@ -26,23 +27,61 @@ type Ctx = Pick<
   | "params"
   | "cfg"
   | "accountId"
+  | "requesterAccountId"
   | "requesterSenderId"
   | "senderIsOwner"
   | "toolContext"
-  | "mediaLocalRoots"
-  | "mediaReadFile"
+  | "assertDirectAdapterHandoff"
 >;
+
+const guildMetadataReads: Partial<
+  Record<Ctx["action"], { action: string; requiredParams: string[] }>
+> = {
+  "member-info": { action: "memberInfo", requiredParams: ["userId", "guildId"] },
+  "role-info": { action: "roleInfo", requiredParams: ["guildId"] },
+  "channel-info": { action: "channelInfo", requiredParams: ["channelId"] },
+  "channel-list": { action: "channelList", requiredParams: ["guildId"] },
+  "voice-status": { action: "voiceStatus", requiredParams: ["guildId", "userId"] },
+  "event-list": { action: "eventList", requiredParams: ["guildId"] },
+};
+
+const channelMutation = {
+  "channel-create": { action: "channelCreate", read: readDiscordChannelCreateParams },
+  "channel-edit": { action: "channelEdit", read: readDiscordChannelEditParams },
+  "channel-move": { action: "channelMove", read: readDiscordChannelMoveParams },
+};
 
 function readDiscordRequesterSenderId(ctx: Ctx): string | undefined {
   const currentProvider = normalizeOptionalString(ctx.toolContext?.currentChannelProvider);
   if (currentProvider?.toLowerCase() === "discord") {
     return normalizeOptionalString(ctx.requesterSenderId);
   }
+  // The host binds a source-less scheduled edit to its saved native requester.
+  // The handoff guards that admitted invocation; requester fields never come from params.
+  if (
+    ctx.action === "channel-edit" &&
+    !currentProvider &&
+    ctx.senderIsOwner === false &&
+    ctx.assertDirectAdapterHandoff &&
+    ctx.accountId &&
+    ctx.requesterAccountId === ctx.accountId
+  ) {
+    ctx.assertDirectAdapterHandoff();
+    const requester = normalizeOptionalString(ctx.requesterSenderId);
+    if (requester) {
+      return requester;
+    }
+  }
   if (
     isTrustedRequesterGuildAdminAction(ctx.action) &&
     (currentProvider || ctx.senderIsOwner !== true)
   ) {
-    throw new Error("Discord guild admin actions require a trusted Discord sender identity.");
+    throw new Error(
+      "Discord guild admin actions require a trusted Discord sender identity." +
+        (ctx.action === "channel-edit" && !currentProvider
+          ? " Recreate an automation without recorded execution authorization from a fresh authenticated Discord turn that can manage automations."
+          : ""),
+    );
   }
   return undefined;
 }
@@ -54,40 +93,41 @@ function senderParam(senderUserId: string | undefined) {
 export async function tryHandleDiscordMessageActionGuildAdmin(params: {
   ctx: Ctx;
   resolveChannelId: () => string;
+  readPolicyOptions?: DiscordMessagingActionOptions;
+  actionOptions: DiscordMessagingActionOptions;
 }): Promise<AgentToolResult<unknown> | undefined> {
-  const { ctx, resolveChannelId } = params;
+  const { ctx, resolveChannelId, readPolicyOptions, actionOptions } = params;
   const { action, params: actionParams, cfg } = ctx;
   const accountId = ctx.accountId ?? readStringParam(actionParams, "accountId");
   const senderUserId = readDiscordRequesterSenderId(ctx);
 
-  if (action === "member-info") {
-    const userId = readStringParam(actionParams, "userId", { required: true });
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
-    return await handleDiscordAction(
-      { action: "memberInfo", accountId: accountId ?? undefined, guildId, userId },
-      cfg,
+  const metadataRead = guildMetadataReads[action];
+  if (metadataRead) {
+    const values = Object.fromEntries(
+      metadataRead.requiredParams.map((key) => [
+        key,
+        readStringParam(actionParams, key, { required: true }),
+      ]),
     );
-  }
-
-  if (action === "role-info") {
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
     return await handleDiscordAction(
-      { action: "roleInfo", accountId: accountId ?? undefined, guildId },
+      { action: metadataRead.action, accountId: accountId ?? undefined, ...values },
       cfg,
+      readPolicyOptions,
     );
   }
 
   if (action === "emoji-list") {
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
+    const guildId = readStringParam(actionParams, "guildId");
+    const limit = readPositiveIntegerParam(actionParams, "limit");
     return await handleDiscordAction(
-      { action: "emojiList", accountId: accountId ?? undefined, guildId },
+      {
+        action: "emojiList",
+        accountId: accountId ?? undefined,
+        ...(guildId ? { guildId } : { channelId: resolveChannelId() }),
+        ...(limit ? { limit } : {}),
+      },
       cfg,
+      readPolicyOptions,
     );
   }
 
@@ -112,6 +152,7 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
         ...senderParam(senderUserId),
       },
       cfg,
+      actionOptions,
     );
   }
 
@@ -144,6 +185,7 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
         ...senderParam(senderUserId),
       },
       cfg,
+      actionOptions,
     );
   }
 
@@ -166,50 +208,13 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
     );
   }
 
-  if (action === "channel-info") {
-    const channelId = readStringParam(actionParams, "channelId", {
-      required: true,
-    });
-    return await handleDiscordAction(
-      { action: "channelInfo", accountId: accountId ?? undefined, channelId },
-      cfg,
-    );
-  }
-
-  if (action === "channel-list") {
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
-    return await handleDiscordAction(
-      { action: "channelList", accountId: accountId ?? undefined, guildId },
-      cfg,
-    );
-  }
-
-  if (action === "channel-create") {
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
+  if (action === "channel-create" || action === "channel-edit" || action === "channel-move") {
+    const mutation = channelMutation[action];
     return await handleDiscordAction(
       {
-        action: "channelCreate",
+        action: mutation.action,
         accountId: accountId ?? undefined,
-        ...readDiscordChannelCreateParams({ ...actionParams, guildId }),
-        ...senderParam(senderUserId),
-      },
-      cfg,
-    );
-  }
-
-  if (action === "channel-edit") {
-    const channelId = readStringParam(actionParams, "channelId", {
-      required: true,
-    });
-    return await handleDiscordAction(
-      {
-        action: "channelEdit",
-        accountId: accountId ?? undefined,
-        ...readDiscordChannelEditParams({ ...actionParams, channelId }),
+        ...mutation.read(actionParams),
         ...senderParam(senderUserId),
       },
       cfg,
@@ -231,94 +236,30 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
     );
   }
 
-  if (action === "channel-move") {
-    const guildId = readStringParam(actionParams, "guildId", {
+  if (action === "category-create" || action === "category-edit" || action === "category-delete") {
+    const creating = action === "category-create";
+    const categoryId = readStringParam(actionParams, creating ? "guildId" : "categoryId", {
       required: true,
     });
-    const channelId = readStringParam(actionParams, "channelId", {
-      required: true,
-    });
+    const fields =
+      action === "category-delete"
+        ? {}
+        : {
+            name: readStringParam(actionParams, "name", { required: creating }),
+            position: readNonNegativeIntegerParam(actionParams, "position"),
+          };
     return await handleDiscordAction(
       {
-        action: "channelMove",
+        action: creating
+          ? "categoryCreate"
+          : action === "category-edit"
+            ? "categoryEdit"
+            : "categoryDelete",
         accountId: accountId ?? undefined,
-        ...readDiscordChannelMoveParams({ ...actionParams, guildId, channelId }),
+        ...(creating ? { guildId: categoryId } : { categoryId }),
+        ...fields,
         ...senderParam(senderUserId),
       },
-      cfg,
-    );
-  }
-
-  if (action === "category-create") {
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
-    const name = readStringParam(actionParams, "name", { required: true });
-    const position = readNonNegativeIntegerParam(actionParams, "position");
-    return await handleDiscordAction(
-      {
-        action: "categoryCreate",
-        accountId: accountId ?? undefined,
-        guildId,
-        name,
-        position: position ?? undefined,
-        ...senderParam(senderUserId),
-      },
-      cfg,
-    );
-  }
-
-  if (action === "category-edit") {
-    const categoryId = readStringParam(actionParams, "categoryId", {
-      required: true,
-    });
-    const name = readStringParam(actionParams, "name");
-    const position = readNonNegativeIntegerParam(actionParams, "position");
-    return await handleDiscordAction(
-      {
-        action: "categoryEdit",
-        accountId: accountId ?? undefined,
-        categoryId,
-        name: name ?? undefined,
-        position: position ?? undefined,
-        ...senderParam(senderUserId),
-      },
-      cfg,
-    );
-  }
-
-  if (action === "category-delete") {
-    const categoryId = readStringParam(actionParams, "categoryId", {
-      required: true,
-    });
-    return await handleDiscordAction(
-      {
-        action: "categoryDelete",
-        accountId: accountId ?? undefined,
-        categoryId,
-        ...senderParam(senderUserId),
-      },
-      cfg,
-    );
-  }
-
-  if (action === "voice-status") {
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
-    const userId = readStringParam(actionParams, "userId", { required: true });
-    return await handleDiscordAction(
-      { action: "voiceStatus", accountId: accountId ?? undefined, guildId, userId },
-      cfg,
-    );
-  }
-
-  if (action === "event-list") {
-    const guildId = readStringParam(actionParams, "guildId", {
-      required: true,
-    });
-    return await handleDiscordAction(
-      { action: "eventList", accountId: accountId ?? undefined, guildId },
       cfg,
     );
   }
@@ -353,7 +294,7 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
         ...senderParam(senderUserId),
       },
       cfg,
-      { mediaLocalRoots: ctx.mediaLocalRoots },
+      actionOptions,
     );
   }
 
@@ -368,14 +309,8 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
     });
     return await handleDiscordAction(
       {
-        action: moderation.action,
+        ...moderation,
         accountId: accountId ?? undefined,
-        guildId: moderation.guildId,
-        userId: moderation.userId,
-        durationMinutes: moderation.durationMinutes,
-        until: moderation.until,
-        reason: moderation.reason,
-        deleteMessageDays: moderation.deleteMessageDays,
         senderUserId,
       },
       cfg,
@@ -403,12 +338,14 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
         limit,
       },
       cfg,
+      readPolicyOptions,
     );
   }
 
   if (action === "thread-reply") {
     const content = readStringParam(actionParams, "message", {
       required: true,
+      trim: false,
     });
     const mediaUrl =
       readStringParam(actionParams, "media", { trim: false }) ??
@@ -429,9 +366,10 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
         content,
         mediaUrl: mediaUrl ?? undefined,
         replyTo: replyTo ?? undefined,
+        ...(readBooleanParam(actionParams, "silent") === true ? { silent: true } : {}),
       },
       cfg,
-      { mediaLocalRoots: ctx.mediaLocalRoots, mediaReadFile: ctx.mediaReadFile },
+      actionOptions,
     );
   }
 
@@ -467,6 +405,7 @@ export async function tryHandleDiscordMessageActionGuildAdmin(params: {
         limit: readPositiveIntegerParam(actionParams, "limit"),
       },
       cfg,
+      readPolicyOptions,
     );
   }
 

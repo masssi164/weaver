@@ -1,7 +1,9 @@
-// Signal tests cover monitor.tool result.sends tool summaries responseprefix plugin behavior.
 import { expectPairingReplyText } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
+import type { GetReplyOptions } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
+import { waitForAbortSignal } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeE164 } from "openclaw/plugin-sdk/text-utility-runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -10,6 +12,9 @@ import {
   getSignalToolResultTestMocks,
   installSignalToolResultTestHooks,
   setSignalToolResultTestConfig,
+  toSignalToolResultTestError,
+  waitForSignalToolResultIngressDispatchIdle,
+  waitForSignalToolResultIngressIdle,
 } from "./monitor.tool-result.test-harness.js";
 
 installSignalToolResultTestHooks();
@@ -30,6 +35,10 @@ const {
 const SIGNAL_BASE_URL = "http://127.0.0.1:8080";
 type MonitorSignalProviderOptions = NonNullable<Parameters<typeof monitorSignalProvider>[0]>;
 
+function waitForSignalDelivery(assertion: () => void) {
+  return vi.waitFor(assertion, { interval: 1, timeout: 5_000 });
+}
+
 async function runMonitorWithMocks(opts: MonitorSignalProviderOptions) {
   return monitorSignalProvider({
     config: config as OpenClawConfig,
@@ -44,14 +53,21 @@ async function receiveSignalPayloads(params: {
   opts?: Partial<MonitorSignalProviderOptions>;
 }) {
   const abortController = new AbortController();
+  let ingressError: Error | undefined;
   streamMock.mockImplementation(async ({ onEvent }) => {
-    for (const payload of params.payloads) {
-      await onEvent({
-        event: "receive",
-        data: JSON.stringify(payload),
-      });
+    try {
+      for (const payload of params.payloads) {
+        await onEvent({
+          event: "receive",
+          data: JSON.stringify(payload),
+        });
+      }
+      await waitForSignalToolResultIngressIdle();
+    } catch (error) {
+      ingressError = toSignalToolResultTestError(error, "Signal ingress delivery failed");
+    } finally {
+      abortController.abort();
     }
-    abortController.abort();
   });
 
   await runMonitorWithMocks({
@@ -60,6 +76,9 @@ async function receiveSignalPayloads(params: {
     abortSignal: abortController.signal,
     ...params.opts,
   });
+  if (ingressError) {
+    throw ingressError;
+  }
 }
 
 function hasQueuedReactionEventFor(sender: string) {
@@ -81,6 +100,23 @@ function hasQueuedReactionEventFor(sender: string) {
   });
 }
 
+function createSignalQuoteInput() {
+  return {
+    payloads: [
+      {
+        envelope: {
+          sourceNumber: "+15550001111",
+          sourceName: "Ada",
+          timestamp: 1700000000001,
+          dataMessage: {
+            message: "quote me",
+          },
+        },
+      },
+    ],
+  };
+}
+
 function makeBaseEnvelope(overrides: Record<string, unknown> = {}) {
   return {
     sourceNumber: "+15550001111",
@@ -98,6 +134,12 @@ async function receiveSingleEnvelope(
     payloads: [{ envelope }],
     opts,
   });
+}
+
+function expectNoNativeQuote(options: unknown) {
+  expect(options).not.toHaveProperty("replyToId");
+  expect(options).not.toHaveProperty("replyToAuthor");
+  expect(options).not.toHaveProperty("replyToBody");
 }
 
 function expectNoReplyDeliveryOrRouteUpdate() {
@@ -137,39 +179,70 @@ describe("monitorSignalProvider tool results", () => {
       ],
     });
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
     expect(sendMock.mock.calls[0]?.[1]).toBe("PFX final reply");
   });
 
-  it("passes inbound Signal quote metadata to final replies", async () => {
-    replyMock.mockResolvedValue({ text: "final reply" });
+  it.each([
+    { failed: true, media: false, finalQuoted: true },
+    { failed: true, media: true, finalQuoted: true },
+    { failed: false, media: false, finalQuoted: false },
+    { failed: false, media: true, finalQuoted: false },
+  ] as const)(
+    "quotes final replies after a block: failed=$failed media=$media",
+    async ({ failed, media, finalQuoted }) => {
+      setSignalToolResultTestConfig(
+        createSignalToolResultConfig({
+          autoStart: false,
+          replyToMode: "first",
+          streaming: { block: { enabled: true } },
+        }),
+      );
+      sendMock.mockResolvedValue({ messageId: "1700000000002" });
+      if (failed) {
+        sendMock.mockRejectedValueOnce(
+          new PlatformMessageNotDispatchedError("not dispatched", { cause: new Error("offline") }),
+        );
+      }
+      replyMock.mockImplementation(async (_ctx, options: GetReplyOptions) => {
+        await options.onBlockReply?.({
+          text: "Streamed block",
+          ...(media ? { mediaUrl: "https://example.com/block.png" } : {}),
+        });
+        return { text: "Final answer" };
+      });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+      await receiveSingleEnvelope({
+        ...makeBaseEnvelope({ timestamp: 1700000000001 }),
+        dataMessage: { message: "quote me" },
+      });
 
-    await vi.waitFor(() => {
-      expect(sendMock).toHaveBeenCalledTimes(1);
-    });
-    expect(sendMock.mock.calls[0]?.[2]).toMatchObject({
-      replyToId: "1700000000001",
-      replyToAuthor: "+15550001111",
-      replyToBody: "quote me",
-    });
-  });
+      expect(sendMock).toHaveBeenCalledTimes(2);
+      expect(sendMock.mock.calls.map((call) => call[1])).toEqual([
+        "PFX Streamed block",
+        "PFX Final answer",
+      ]);
+      const quote = {
+        replyToId: "1700000000001",
+        replyToAuthor: "+15550001111",
+        replyToBody: "quote me",
+      };
+      expect(sendMock.mock.calls[0]?.[2]).toMatchObject(quote);
+      if (media) {
+        expect(sendMock.mock.calls[0]?.[2]).toHaveProperty(
+          "mediaUrl",
+          "https://example.com/block.png",
+        );
+      }
+      if (finalQuoted) {
+        expect(sendMock.mock.calls[1]?.[2]).toMatchObject(quote);
+      } else {
+        expect(sendMock.mock.calls[1]?.[2]).not.toHaveProperty("replyToId");
+      }
+    },
+  );
 
   it("passes UUID-only inbound Signal quote metadata to final replies", async () => {
     replyMock.mockResolvedValue({ text: "final reply" });
@@ -189,7 +262,7 @@ describe("monitorSignalProvider tool results", () => {
       ],
     });
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
     expect(sendMock.mock.calls[0]?.[2]).toMatchObject({
@@ -229,7 +302,7 @@ describe("monitorSignalProvider tool results", () => {
       ],
     });
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
     expect(sendMock.mock.calls[0]?.[0]).toBe("group:signal-group-id");
@@ -250,22 +323,9 @@ describe("monitorSignalProvider tool results", () => {
     );
     replyMock.mockResolvedValue({ text: "chunked Signal reply" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock.mock.calls.length).toBeGreaterThan(1);
     });
     for (const call of sendMock.mock.calls) {
@@ -287,22 +347,9 @@ describe("monitorSignalProvider tool results", () => {
     );
     replyMock.mockResolvedValue({ text: "chunked Signal reply" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock.mock.calls.length).toBeGreaterThan(1);
     });
     expect(sendMock.mock.calls[0]?.[2]).toMatchObject({
@@ -311,47 +358,8 @@ describe("monitorSignalProvider tool results", () => {
       replyToBody: "quote me",
     });
     for (const call of sendMock.mock.calls.slice(1)) {
-      expect(call[2]).not.toHaveProperty("replyToId");
-      expect(call[2]).not.toHaveProperty("replyToAuthor");
-      expect(call[2]).not.toHaveProperty("replyToBody");
+      expectNoNativeQuote(call[2]);
     }
-  });
-
-  it("uses native quote metadata only on the first implicit payload when configured", async () => {
-    setSignalToolResultTestConfig(
-      createSignalToolResultConfig({
-        autoStart: false,
-        replyToMode: "first",
-      }),
-    );
-    replyMock.mockResolvedValue([{ text: "first reply" }, { text: "second reply" }]);
-
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
-
-    await vi.waitFor(() => {
-      expect(sendMock).toHaveBeenCalledTimes(2);
-    });
-    expect(sendMock.mock.calls[0]?.[2]).toMatchObject({
-      replyToId: "1700000000001",
-      replyToAuthor: "+15550001111",
-      replyToBody: "quote me",
-    });
-    expect(sendMock.mock.calls[1]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[1]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[1]?.[2]).not.toHaveProperty("replyToBody");
   });
 
   it.each([
@@ -369,22 +377,9 @@ describe("monitorSignalProvider tool results", () => {
       );
       replyMock.mockResolvedValue([{ text: "working", ...flag }, { text: "final reply" }]);
 
-      await receiveSignalPayloads({
-        payloads: [
-          {
-            envelope: {
-              sourceNumber: "+15550001111",
-              sourceName: "Ada",
-              timestamp: 1700000000001,
-              dataMessage: {
-                message: "quote me",
-              },
-            },
-          },
-        ],
-      });
+      await receiveSignalPayloads(createSignalQuoteInput());
 
-      await vi.waitFor(() => {
+      await waitForSignalDelivery(() => {
         expect(sendMock).toHaveBeenCalledTimes(2);
       });
       for (const call of sendMock.mock.calls) {
@@ -397,48 +392,31 @@ describe("monitorSignalProvider tool results", () => {
     },
   );
 
-  it.each([
-    ["status", { isStatusNotice: true }],
-    ["fallback", { isFallbackNotice: true }],
-    ["compaction", { isCompactionNotice: true }],
-  ] as const)(
-    "keeps %s notices quoted after the first normal native reply",
-    async (_name, flag) => {
-      setSignalToolResultTestConfig(
-        createSignalToolResultConfig({
-          autoStart: false,
-          replyToMode: "first",
-        }),
-      );
-      replyMock.mockResolvedValue([{ text: "final reply" }, { text: "still working", ...flag }]);
+  it("keeps status notices quoted after the first normal native reply", async () => {
+    setSignalToolResultTestConfig(
+      createSignalToolResultConfig({
+        autoStart: false,
+        replyToMode: "first",
+      }),
+    );
+    replyMock.mockResolvedValue([
+      { text: "final reply" },
+      { text: "still working", isStatusNotice: true },
+    ]);
 
-      await receiveSignalPayloads({
-        payloads: [
-          {
-            envelope: {
-              sourceNumber: "+15550001111",
-              sourceName: "Ada",
-              timestamp: 1700000000001,
-              dataMessage: {
-                message: "quote me",
-              },
-            },
-          },
-        ],
-      });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-      await vi.waitFor(() => {
-        expect(sendMock).toHaveBeenCalledTimes(2);
+    await waitForSignalDelivery(() => {
+      expect(sendMock).toHaveBeenCalledTimes(2);
+    });
+    for (const call of sendMock.mock.calls) {
+      expect(call[2]).toMatchObject({
+        replyToId: "1700000000001",
+        replyToAuthor: "+15550001111",
+        replyToBody: "quote me",
       });
-      for (const call of sendMock.mock.calls) {
-        expect(call[2]).toMatchObject({
-          replyToId: "1700000000001",
-          replyToAuthor: "+15550001111",
-          replyToBody: "quote me",
-        });
-      }
-    },
-  );
+    }
+  });
 
   it.each([
     ["status", { isStatusNotice: true }],
@@ -451,29 +429,19 @@ describe("monitorSignalProvider tool results", () => {
         replyToMode: "off",
       }),
     );
-    replyMock.mockResolvedValue([{ text: "working", ...flag }]);
+    replyMock.mockResolvedValue([{ text: "working", ...flag }, { text: "final reply" }]);
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
-      expect(sendMock).toHaveBeenCalledTimes(1);
+    await waitForSignalDelivery(() => {
+      expect(sendMock).toHaveBeenCalledTimes(2);
     });
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToBody");
+    expect(sendMock.mock.calls.map((call) => call[1])).toEqual(["PFX working", "PFX final reply"]);
+    for (const call of sendMock.mock.calls) {
+      expect(call[2]).not.toHaveProperty("replyToId");
+      expect(call[2]).not.toHaveProperty("replyToAuthor");
+      expect(call[2]).not.toHaveProperty("replyToBody");
+    }
   });
 
   it("does not implicitly quote a single-message batched-mode turn", async () => {
@@ -485,107 +453,105 @@ describe("monitorSignalProvider tool results", () => {
     );
     replyMock.mockResolvedValue({ text: "final reply" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToBody");
+    expectNoNativeQuote(sendMock.mock.calls[0]?.[2]);
   });
 
-  it("quotes the last inbound message for multi-message batched-mode turns", async () => {
-    vi.useFakeTimers();
-    try {
-      setSignalToolResultTestConfig({
-        ...createSignalToolResultConfig({
-          autoStart: false,
-          replyToMode: "batched",
-        }),
-        messages: { inbound: { debounceMs: 10 } },
-      });
-      replyMock.mockResolvedValue([{ text: "first reply" }, { text: "second reply" }]);
-      const abortController = new AbortController();
-      streamMock.mockImplementation(async ({ onEvent }) => {
-        for (const [timestamp, message] of [
-          [1700000000001, "first debounced message"],
-          [1700000000002, "second debounced message"],
-        ] as const) {
-          await onEvent({
-            event: "receive",
-            data: JSON.stringify({
-              envelope: {
-                sourceNumber: "+15550001111",
-                sourceName: "Ada",
-                timestamp,
-                dataMessage: { message },
-              },
-            }),
-          });
-        }
-        await vi.advanceTimersByTimeAsync(10);
-        abortController.abort();
-      });
-
-      await runMonitorWithMocks({
+  it("keeps durable conversation events separate in batched reply mode", async ({ signal }) => {
+    setSignalToolResultTestConfig({
+      ...createSignalToolResultConfig({
         autoStart: false,
-        baseUrl: SIGNAL_BASE_URL,
-        abortSignal: abortController.signal,
-      });
+        replyToMode: "batched",
+      }),
+      messages: { visibleReplies: "automatic", inbound: { debounceMs: 10 } },
+    });
+    replyMock.mockResolvedValue({ text: "reply" });
+    const abortController = new AbortController();
+    const eventsAccepted = Promise.withResolvers<void>();
+    const messages = [
+      {
+        timestamp: 1700000000001,
+        message: "first message",
+        delivered: Promise.withResolvers<void>(),
+      },
+      {
+        timestamp: 1700000000002,
+        message: "second message",
+        delivered: Promise.withResolvers<void>(),
+      },
+    ];
+    sendMock.mockImplementation(async () => {
+      messages[sendMock.mock.calls.length - 1]?.delivered.resolve();
+    });
+    streamMock.mockImplementation(async ({ onEvent, abortSignal }) => {
+      for (const { timestamp, message } of messages) {
+        await onEvent({
+          event: "receive",
+          data: JSON.stringify({
+            envelope: {
+              sourceNumber: "+15550001111",
+              sourceName: "Ada",
+              timestamp,
+              dataMessage: { message },
+            },
+          }),
+        });
+      }
+      eventsAccepted.resolve();
+      await waitForAbortSignal(abortSignal);
+    });
 
-      await vi.waitFor(() => {
-        expect(sendMock).toHaveBeenCalledTimes(2);
-      });
-      expect(sendMock.mock.calls[0]?.[2]).toMatchObject({
-        replyToId: "1700000000002",
-        replyToAuthor: "+15550001111",
-        replyToBody: "second debounced message",
-      });
-      expect(sendMock.mock.calls[1]?.[2]).not.toHaveProperty("replyToId");
-      expect(sendMock.mock.calls[1]?.[2]).not.toHaveProperty("replyToAuthor");
-      expect(sendMock.mock.calls[1]?.[2]).not.toHaveProperty("replyToBody");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const monitorPromise = runMonitorWithMocks({
+      autoStart: false,
+      baseUrl: SIGNAL_BASE_URL,
+      abortSignal: AbortSignal.any([abortController.signal, signal]),
+    });
+    const monitorStopped = monitorPromise.then(() => {
+      throw new Error("Signal monitor stopped before delivering both replies");
+    });
+    try {
+      await Promise.race([eventsAccepted.promise, monitorStopped]);
+      for (const [index, { timestamp, message, delivered }] of messages.entries()) {
+        // Pump admission can finish before the handler schedules its debounce.
+        await Promise.race([waitForSignalToolResultIngressDispatchIdle(), monitorStopped]);
+        await vi.advanceTimersByTimeAsync(10);
+        await Promise.race([delivered.promise, monitorStopped]);
+        expect(replyMock.mock.calls[index]?.[0]).toMatchObject({
+          MessageSid: String(timestamp),
+          RawBody: message,
+        });
+      }
     } finally {
-      vi.useRealTimers();
+      abortController.abort();
+      try {
+        await monitorPromise;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+
+    expect(replyMock).toHaveBeenCalledTimes(2);
+    expect(sendMock).toHaveBeenCalledTimes(2);
+    for (const call of sendMock.mock.calls) {
+      expectNoNativeQuote(call[2]);
     }
   });
 
   it("passes inbound Signal quote metadata to media replies", async () => {
-    replyMock.mockResolvedValue({ text: "caption", mediaUrl: "file:///tmp/reply.png" });
+    replyMock.mockResolvedValue({ text: "caption", mediaUrl: "https://example.com/reply.png" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
     expect(sendMock.mock.calls[0]?.[2]).toMatchObject({
-      mediaUrl: "file:///tmp/reply.png",
+      mediaUrl: "https://example.com/reply.png",
       replyToId: "1700000000001",
       replyToAuthor: "+15550001111",
       replyToBody: "quote me",
@@ -595,53 +561,23 @@ describe("monitorSignalProvider tool results", () => {
   it("does not attach native quote metadata for a different explicit reply target", async () => {
     replyMock.mockResolvedValue({ text: "final reply", replyToId: "1700000000999" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToBody");
+    expectNoNativeQuote(sendMock.mock.calls[0]?.[2]);
   });
 
   it("does not attach native quote metadata when the reply opts out of the current message", async () => {
     replyMock.mockResolvedValue({ text: "status reply", replyToCurrent: false });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToBody");
+    expectNoNativeQuote(sendMock.mock.calls[0]?.[2]);
   });
 
   it("does not reconstruct native quote metadata when replyToMode strips threading", async () => {
@@ -650,27 +586,12 @@ describe("monitorSignalProvider tool results", () => {
     );
     replyMock.mockResolvedValue({ text: "final reply" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToBody");
+    expectNoNativeQuote(sendMock.mock.calls[0]?.[2]);
   });
 
   it("keeps explicit current-message native quote metadata when reply mode is off", async () => {
@@ -679,22 +600,9 @@ describe("monitorSignalProvider tool results", () => {
     );
     replyMock.mockResolvedValue({ text: "final reply", replyToCurrent: true });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
     expect(sendMock.mock.calls[0]?.[2]).toMatchObject({
@@ -714,27 +622,12 @@ describe("monitorSignalProvider tool results", () => {
     );
     replyMock.mockResolvedValue({ text: "final reply" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToBody");
+    expectNoNativeQuote(sendMock.mock.calls[0]?.[2]);
   });
 
   it("lets account replyToMode override channel chat-type quote settings", async () => {
@@ -751,27 +644,12 @@ describe("monitorSignalProvider tool results", () => {
     );
     replyMock.mockResolvedValue({ text: "final reply" });
 
-    await receiveSignalPayloads({
-      payloads: [
-        {
-          envelope: {
-            sourceNumber: "+15550001111",
-            sourceName: "Ada",
-            timestamp: 1700000000001,
-            dataMessage: {
-              message: "quote me",
-            },
-          },
-        },
-      ],
-    });
+    await receiveSignalPayloads(createSignalQuoteInput());
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToId");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToAuthor");
-    expect(sendMock.mock.calls[0]?.[2]).not.toHaveProperty("replyToBody");
+    expectNoNativeQuote(sendMock.mock.calls[0]?.[2]);
   });
 
   it("replies with pairing code when dmPolicy is pairing and no allowFrom is set", async () => {
@@ -832,20 +710,6 @@ describe("monitorSignalProvider tool results", () => {
     expectNoReplyDeliveryOrRouteUpdate();
   });
 
-  it("enqueues system events for reaction notifications", async () => {
-    setReactionNotificationConfig("all");
-    await receiveSingleEnvelope({
-      ...makeBaseEnvelope(),
-      reactionMessage: {
-        emoji: "✅",
-        targetAuthor: "+15550002222",
-        targetSentTimestamp: 2,
-      },
-    });
-
-    expect(hasQueuedReactionEventFor("+15550001111")).toBe(true);
-  });
-
   it.each([
     {
       name: "blocks reaction notifications from unauthorized senders when dmPolicy is allowlist",
@@ -903,6 +767,43 @@ describe("monitorSignalProvider tool results", () => {
     expect(hasQueuedReactionEventFor("+15550001111")).toBe(true);
   });
 
+  it("notifies on own UUID-only reactions using the configured account UUID", async () => {
+    const accountUuid = "123e4567-e89b-12d3-a456-426614174000";
+    setReactionNotificationConfig("own", {
+      account: "+15550002222",
+      accountUuid,
+    });
+
+    await receiveSingleEnvelope({
+      ...makeBaseEnvelope(),
+      reactionMessage: {
+        emoji: "✅",
+        targetAuthorUuid: accountUuid,
+        targetSentTimestamp: 2,
+      },
+    });
+
+    expect(hasQueuedReactionEventFor("+15550001111")).toBe(true);
+  });
+
+  it("does not classify a different account UUID as an own reaction", async () => {
+    setReactionNotificationConfig("own", {
+      account: "+15550002222",
+      accountUuid: "123e4567-e89b-12d3-a456-426614174000",
+    });
+
+    await receiveSingleEnvelope({
+      ...makeBaseEnvelope(),
+      reactionMessage: {
+        emoji: "✅",
+        targetAuthorUuid: "00000000-0000-4000-8000-000000000001",
+        targetSentTimestamp: 2,
+      },
+    });
+
+    expect(hasQueuedReactionEventFor("+15550001111")).toBe(false);
+  });
+
   it("processes messages when reaction metadata is present", async () => {
     replyMock.mockResolvedValue({ text: "pong" });
 
@@ -926,7 +827,7 @@ describe("monitorSignalProvider tool results", () => {
       ],
     });
 
-    await vi.waitFor(() => {
+    await waitForSignalDelivery(() => {
       expect(sendMock).toHaveBeenCalledTimes(1);
     });
   });

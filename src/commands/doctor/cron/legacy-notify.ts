@@ -1,4 +1,5 @@
 // Legacy cron `notify: true` migration to explicit webhook/completion delivery.
+import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
@@ -36,10 +37,7 @@ export function migrateLegacyNotifyFallback(params: {
       continue;
     }
 
-    const delivery =
-      raw.delivery && typeof raw.delivery === "object" && !Array.isArray(raw.delivery)
-        ? (raw.delivery as Record<string, unknown>)
-        : null;
+    const delivery = asNullableRecord(raw.delivery);
     const mode = normalizeOptionalLowercaseString(delivery?.mode);
     const to = normalizeOptionalString(delivery?.to);
     const hasLegacyChatDelivery =
@@ -49,12 +47,7 @@ export function migrateLegacyNotifyFallback(params: {
         normalizeOptionalString(delivery.accountId) !== undefined ||
         "threadId" in delivery ||
         (to !== undefined && !normalizeHttpWebhookUrl(to)));
-    const completionDestination =
-      delivery?.completionDestination &&
-      typeof delivery.completionDestination === "object" &&
-      !Array.isArray(delivery.completionDestination)
-        ? (delivery.completionDestination as Record<string, unknown>)
-        : null;
+    const completionDestination = asNullableRecord(delivery?.completionDestination);
     const completionMode = normalizeOptionalLowercaseString(completionDestination?.mode);
     const completionTo = normalizeOptionalString(completionDestination?.to);
     const validWebhookTo = to ? normalizeHttpWebhookUrl(to) : undefined;
@@ -72,7 +65,7 @@ export function migrateLegacyNotifyFallback(params: {
     if (configuredLegacyWebhook && !legacyWebhook) {
       // Keep the marker so doctor can retry after the operator fixes the target.
       warnings.push(
-        `Cron job "${jobName}" still uses legacy notify fallback, but cron.webhook is not a valid HTTP(S) URL so doctor cannot migrate it automatically.`,
+        `Automation "${jobName}" still uses legacy notify fallback, but cron.webhook is not a valid HTTP(S) URL so doctor cannot migrate it automatically.`,
       );
       continue;
     }

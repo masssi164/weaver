@@ -1,11 +1,13 @@
 // Loads startup context snippets injected into the first reply turn.
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import { resolveIntegerOption } from "@openclaw/normalization-core/number-coercion";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
+import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { formatDateStamp, resolveUserTimezone } from "../../agents/date-time.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import { openRootFile } from "../../infra/boundary-file-read.js";
+import { openRootFile, readFileDescriptorBounded } from "../../infra/boundary-file-read.js";
 
 const STARTUP_MEMORY_FILE_MAX_BYTES = 16_384;
 const STARTUP_MEMORY_FILE_MAX_CHARS = 1_200;
@@ -94,11 +96,7 @@ function trimStartupMemoryContent(content: string, maxChars: number): string {
   if (trimmed.length <= maxChars) {
     return trimmed;
   }
-  return `${trimmed.slice(0, maxChars)}\n...[truncated]...`;
-}
-
-function escapeQuotedStartupMemory(content: string): string {
-  return content.replaceAll("```", "\\`\\`\\`");
+  return `${truncateUtf16Safe(trimmed, maxChars)}\n...[truncated]...`;
 }
 
 function sanitizeStartupMemoryLabel(value: string): string {
@@ -114,7 +112,7 @@ function formatStartupMemoryBlock(relativePath: string, content: string): string
     `[Untrusted daily memory: ${sanitizeStartupMemoryLabel(relativePath)}]`,
     "BEGIN_QUOTED_NOTES",
     "```text",
-    escapeQuotedStartupMemory(content),
+    content.replaceAll("```", "\\`\\`\\`"),
     "```",
     "END_QUOTED_NOTES",
   ].join("\n");
@@ -152,32 +150,6 @@ function fitStartupMemoryBlock(params: {
   return best;
 }
 
-async function readFromFd(params: { fd: number; maxFileBytes: number }): Promise<string> {
-  const buf = Buffer.alloc(params.maxFileBytes);
-  const bytesRead = await new Promise<number>((resolve, reject) => {
-    fs.read(params.fd, buf, 0, params.maxFileBytes, 0, (error, read) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve(read);
-    });
-  });
-  return buf.subarray(0, bytesRead).toString("utf-8");
-}
-
-async function closeFd(fd: number): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    fs.close(fd, (error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    });
-  });
-}
-
 async function readStartupMemoryFile(params: {
   workspaceDir: string;
   relativePath: string;
@@ -194,9 +166,9 @@ async function readStartupMemoryFile(params: {
     return null;
   }
   try {
-    return await readFromFd({ fd: opened.fd, maxFileBytes: params.maxFileBytes });
+    return (await readFileDescriptorBounded(opened.fd, params.maxFileBytes)).toString("utf-8");
   } finally {
-    await closeFd(opened.fd);
+    await promisify(fs.close)(opened.fd);
   }
 }
 
@@ -211,38 +183,25 @@ async function listStartupMemoryPathsByDate(params: {
 
   try {
     const entries = await fs.promises.readdir(memoryDir, { withFileTypes: true });
-    const sluggedNamesByStamp = new Map<string, string[]>();
-
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".md")) {
-        continue;
-      }
+    const sluggedNames = entries.flatMap((entry) => {
       const stamp = entry.name.slice(0, 10);
-      if (!stampSet.has(stamp)) {
-        continue;
+      if (
+        !entry.isFile() ||
+        !entry.name.endsWith(".md") ||
+        !stampSet.has(stamp) ||
+        !entry.name.startsWith(`${stamp}-`)
+      ) {
+        return [];
       }
-      if (entry.name === `${stamp}.md`) {
-        continue;
-      }
-      if (!entry.name.startsWith(`${stamp}-`)) {
-        continue;
-      }
-      const names = sluggedNamesByStamp.get(stamp);
-      if (names) {
-        names.push(entry.name);
-      } else {
-        sluggedNamesByStamp.set(stamp, [entry.name]);
-      }
-    }
+      return [{ stamp, name: entry.name }];
+    });
 
     const sluggedNameResults = await Promise.allSettled(
-      Array.from(sluggedNamesByStamp.entries()).flatMap(([stamp, names]) =>
-        names.map(async (name) => ({
-          stamp,
-          name,
-          stat: await fs.promises.stat(path.join(memoryDir, name)),
-        })),
-      ),
+      sluggedNames.map(async ({ stamp, name }) => ({
+        stamp,
+        name,
+        stat: await fs.promises.stat(path.join(memoryDir, name)),
+      })),
     );
     const sluggedStatsByStamp = new Map<string, Array<{ name: string; stat: fs.Stats }>>();
     for (const result of sluggedNameResults) {
@@ -340,10 +299,6 @@ export async function buildSessionStartupContextPrelude(params: {
       if (sections.length > 0) {
         sections.push("...[additional startup memory truncated]...");
       }
-      break;
-    }
-    if (sections.length > 0 && totalChars + block.length > limits.maxTotalChars) {
-      sections.push("...[additional startup memory truncated]...");
       break;
     }
     sections.push(block);

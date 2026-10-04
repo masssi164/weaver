@@ -1,4 +1,3 @@
-// Msteams plugin module implements probe behavior.
 import { isFutureDateTimestampMs } from "openclaw/plugin-sdk/number-runtime";
 import {
   normalizeStringEntries,
@@ -6,10 +5,11 @@ import {
   type MSTeamsConfig,
 } from "../runtime-api.js";
 import { resolveMSTeamsSdkCloudOptions } from "./cloud.js";
+import { loadMSTeamsDelegatedTokens } from "./delegated-state.js";
 import { formatUnknownError } from "./errors.js";
+import { withMSTeamsRequestDeadline } from "./request-timeout.js";
 import { createMSTeamsTokenProvider, loadMSTeamsSdkWithAuth } from "./sdk.js";
-import { readAccessToken } from "./token-response.js";
-import { loadDelegatedTokens, resolveMSTeamsCredentials } from "./token.js";
+import { resolveMSTeamsCredentials } from "./token.js";
 
 export type ProbeMSTeamsResult = BaseProbeResult<string> & {
   appId?: string;
@@ -72,22 +72,22 @@ export async function probeMSTeams(cfg?: MSTeamsConfig): Promise<ProbeMSTeamsRes
   try {
     const { app } = await loadMSTeamsSdkWithAuth(creds, resolveMSTeamsSdkCloudOptions(cfg));
     const tokenProvider = createMSTeamsTokenProvider(app);
-    const botTokenValue = await tokenProvider.getAccessToken("https://api.botframework.com");
+    // Token-manager calls can outlive the SDK HTTP timeout, so keep both probe
+    // phases bounded by the shared Teams request deadline.
+    const botTokenValue = await withMSTeamsRequestDeadline({
+      label: "MS Teams Bot Framework probe token",
+      work: () => tokenProvider.getAccessToken("https://api.botframework.com"),
+    });
     if (!botTokenValue) {
       throw new Error("Failed to acquire bot token");
     }
 
-    let graph:
-      | {
-          ok: boolean;
-          error?: string;
-          roles?: string[];
-          scopes?: string[];
-        }
-      | undefined;
+    let graph: ProbeMSTeamsResult["graph"];
     try {
-      const graphTokenValue = await tokenProvider.getAccessToken("https://graph.microsoft.com");
-      const accessToken = readAccessToken(graphTokenValue);
+      const accessToken = await withMSTeamsRequestDeadline({
+        label: "MS Teams Graph probe token",
+        work: () => tokenProvider.getAccessToken("https://graph.microsoft.com"),
+      });
       const payload = accessToken ? decodeJwtPayload(accessToken) : null;
       graph = {
         ok: true,
@@ -100,7 +100,7 @@ export async function probeMSTeams(cfg?: MSTeamsConfig): Promise<ProbeMSTeamsRes
     let delegatedAuth: ProbeMSTeamsResult["delegatedAuth"];
     if (cfg?.delegatedAuth?.enabled) {
       try {
-        const tokens = loadDelegatedTokens();
+        const tokens = await loadMSTeamsDelegatedTokens();
         if (tokens) {
           const isExpired = !isFutureDateTimestampMs(tokens.expiresAt);
           delegatedAuth = {

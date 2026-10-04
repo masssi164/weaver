@@ -29,19 +29,8 @@ export type ResolvedMentionPatternPolicy = {
   enabled: boolean;
 };
 
-function normalizeIdList(values?: string[]): Set<string> {
-  const normalized = new Set<string>();
-  for (const value of values ?? []) {
-    const next = normalizeOptionalString(value);
-    if (next) {
-      normalized.add(next);
-    }
-  }
-  return normalized;
-}
-
 function isMentionPatternsPolicyConfig(value: unknown): value is MentionPatternsPolicyConfig {
-  return value != null && typeof value === "object" && !Array.isArray(value);
+  return isRecord(value);
 }
 
 function resolveProviderMentionPatternsPolicy(
@@ -62,7 +51,7 @@ function resolveProviderMentionPatternsPolicy(
 export function resolveMentionPatternPolicy(
   params: ResolveMentionPatternPolicyParams,
 ): ResolvedMentionPatternPolicy {
-  const conversationId = normalizeOptionalString(params.conversationId ?? undefined) ?? undefined;
+  const conversationId = normalizeOptionalString(params.conversationId);
   const providerPolicy =
     params.providerPolicy ?? resolveProviderMentionPatternsPolicy(params.cfg, params.provider);
   const effectiveMode =
@@ -70,9 +59,15 @@ export function resolveMentionPatternPolicy(
       ? providerPolicy.mode
       : "allow";
   const allowMatched =
-    conversationId != null && normalizeIdList(providerPolicy?.allowIn).has(conversationId);
+    conversationId != null &&
+    (providerPolicy?.allowIn ?? []).some(
+      (value) => normalizeOptionalString(value) === conversationId,
+    );
   const denyMatched =
-    conversationId != null && normalizeIdList(providerPolicy?.denyIn).has(conversationId);
+    conversationId != null &&
+    (providerPolicy?.denyIn ?? []).some(
+      (value) => normalizeOptionalString(value) === conversationId,
+    );
   // Deny always wins. In allow mode everything is enabled except explicit denies; in deny mode
   // only explicitly allowed conversations are enabled.
   const enabled = effectiveMode === "allow" ? !denyMatched : allowMatched && !denyMatched;

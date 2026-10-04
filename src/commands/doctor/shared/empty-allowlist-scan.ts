@@ -1,4 +1,5 @@
 // Doctor scanner for empty allowlist policies across configured channels and accounts.
+import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import type { ChannelDoctorEmptyAllowlistAccountContext } from "../../../channels/plugins/types.adapters.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import {
@@ -8,7 +9,6 @@ import {
 import type { DoctorAccountRecord, DoctorAllowFromList } from "../types.js";
 import { hasAllowFromEntries } from "./allowlist.js";
 import { collectEmptyAllowlistPolicyWarningsForAccount } from "./empty-allowlist-policy.js";
-import { asObjectRecord } from "./object.js";
 
 type ScanEmptyAllowlistPolicyWarningsParams = {
   doctorFixCommand: string;
@@ -26,10 +26,10 @@ function isDisabledRecord(value: unknown): boolean {
 }
 
 /** Scan all configured channels/accounts for empty allowlist policy warnings. */
-export function scanEmptyAllowlistPolicyWarnings(
+export async function scanEmptyAllowlistPolicyWarnings(
   cfg: OpenClawConfig,
   params: ScanEmptyAllowlistPolicyWarningsParams,
-): string[] {
+): Promise<string[]> {
   const channels = cfg.channels;
   if (!channels || typeof channels !== "object") {
     return [];
@@ -44,8 +44,8 @@ export function scanEmptyAllowlistPolicyWarnings(
     parent?: DoctorAccountRecord,
     options: { suppressGroupAllowlistWarning?: boolean } = {},
   ) => {
-    const accountDm = asObjectRecord(account.dm);
-    const parentDm = asObjectRecord(parent?.dm);
+    const accountDm = asNullableRecord(account.dm);
+    const parentDm = asNullableRecord(parent?.dm);
     const dmPolicy =
       (account.dmPolicy as string | undefined) ??
       (accountDm?.policy as string | undefined) ??
@@ -95,13 +95,13 @@ export function scanEmptyAllowlistPolicyWarnings(
     if (isDisabledRecord(channelConfig)) {
       continue;
     }
-    const accounts = asObjectRecord(channelConfig.accounts);
+    const accounts = asNullableRecord(channelConfig.accounts);
     const activeAccounts = accounts
       ? Object.values(accounts).filter((account): account is DoctorAccountRecord =>
           Boolean(account && typeof account === "object" && !isDisabledRecord(account)),
         )
       : [];
-    const accountIds = resolveDoctorChannelAccountIds(
+    const accountIds = await resolveDoctorChannelAccountIds(
       channelName,
       cfg,
       Object.keys(accounts ?? {}),
@@ -127,8 +127,8 @@ export function scanEmptyAllowlistPolicyWarnings(
         if (!getDoctorChannelCapabilities(channelName).groupAllowFromFallbackToAllowFrom) {
           return false;
         }
-        const accountDm = asObjectRecord(account.dm);
-        const parentDm = asObjectRecord(channelConfig.dm);
+        const accountDm = asNullableRecord(account.dm);
+        const parentDm = asNullableRecord(channelConfig.dm);
         const effectiveAllowFrom =
           (account.allowFrom as DoctorAllowFromList | undefined) ??
           (channelConfig.allowFrom as DoctorAllowFromList | undefined) ??
