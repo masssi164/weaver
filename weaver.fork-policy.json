@@ -24,10 +24,25 @@
     "weaver.fork-policy.json"
   ],
   "approvedPlugins": [],
-  "approvedCorePatches": [],
+  "approvedCorePatches": [
+    {
+      "path": ".github/security-review-policy.yml",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/152415",
+      "removalCriterion": "Remove when the fork's trusted security-review policy no longer inherits an upstream-repository rollout PR coordinate.",
+      "maxPatchLines": 3
+    },
+    {
+      "path": "test/scripts/security-review-rollout.test.ts",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/152415",
+      "removalCriterion": "Remove with the fork-local security-review policy exception after upstream rollout coordinates cease to be inherited.",
+      "maxPatchLines": 9
+    }
+  ],
   "budgets": {
-    "maxChangedFiles": 15,
-    "maxChangedCoreFiles": 0,
+    "maxChangedFiles": 16,
+    "maxChangedCoreFiles": 2,
     "maxNonPluginPatchLines": 2500,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
