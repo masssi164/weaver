@@ -111,7 +111,9 @@ integration requirements, not features inferred from a passing distribution test
 
 ## Fork boundary
 
-No core patch or Weaver-owned plugin is approved. The policy permits only declared distribution
-entry points, docs, guard, checks and focused tests. Any exception must be explicit, bounded,
-upstream-tracked, owned and removable. A successful fork check proves repository shape, not live
-security, durability, interoperability or production readiness.
+Two temporary core patches remove this fork's inherited upstream security-review rollout PR
+coordinate and pin that behavior in a test. The fork policy names their maintainer, upstream
+origin, line budget and removal condition. No Weaver-owned plugin is approved. Other changes
+remain confined to declared distribution entry points, docs, guards, checks and focused tests.
+A successful fork check proves repository shape, not live security, durability,
+interoperability or production readiness.
