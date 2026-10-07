@@ -12,7 +12,7 @@ Weaver is a mixed-license repository. The root MIT `LICENSE` applies to upstream
 Copyright © 2026 Massimo (GitHub: masssi164).
 Licensed under the **EUPL-1.2-or-later**.
 
-This grant covers the original Weaver-authored portions of `README.md`, `UPSTREAM.md`, `weaver.fork-policy.json`, `.github/workflows/weaver-distribution.yml`, `docs/weaver/**`, `scripts/weaver/**`, and `test/scripts/weaver-distribution-seams.test.ts`. Explicit third-party notices remain authoritative for incorporated material. The complete licence text is in `docs/weaver/LICENSE-EUPL-1.2.txt`.
+This grant covers the original Weaver-authored portions of `README.md`, `UPSTREAM.md`, `weaver.fork-policy.json`, `.github/workflows/weaver-distribution.yml`, `docs/weaver/**`, `scripts/weaver/**`, `test/scripts/weaver-distribution-seams.test.ts`, and `test/scripts/weaver-mcp-client-journey.test.ts`. Explicit third-party notices remain authoritative for incorporated material. The complete licence text is in `docs/weaver/LICENSE-EUPL-1.2.txt`.
 
 ## OpenClaw and third-party material
 
