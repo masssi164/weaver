@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { describe, expect, it } from "vitest";
@@ -12,6 +12,38 @@ import {
   operatorMcpOAuthIdentity,
   requesterMcpOAuthIdentity,
 } from "../../src/agents/mcp-oauth-identity.js";
+
+function proofInput(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} is required for the live Weaver MCP proof`);
+  }
+  return value;
+}
+
+async function proofWorkloadToken(): Promise<string> {
+  const path = proofInput("WEAVER_MCP_PROOF_TOKEN_FILE");
+  if (!isAbsolute(path)) {
+    throw new Error("WEAVER_MCP_PROOF_TOKEN_FILE must be an absolute path");
+  }
+  const details = await lstat(path);
+  if (!details.isFile() || (details.mode & 0o077) !== 0) {
+    throw new Error("WEAVER_MCP_PROOF_TOKEN_FILE must be a regular owner-only file");
+  }
+  const token = (await readFile(path, "utf8")).trim();
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
+    throw new Error("WEAVER_MCP_PROOF_TOKEN_FILE must contain one JWT access token");
+  }
+  return token;
+}
+
+function proofMatches(value: unknown): unknown[] {
+  if (typeof value !== "object" || value === null) {
+    return [];
+  }
+  const record = value as Record<string, unknown>;
+  return Array.isArray(record.matches) ? record.matches : proofMatches(record.result);
+}
 
 /** Distribution seam using the real OpenClaw MCP client against an isolated protocol endpoint. */
 describe("Weaver MCP client journey", () => {
@@ -158,4 +190,75 @@ describe("Weaver MCP client journey", () => {
       await rm(workspaceDir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.env.WEAVER_MCP_LIVE_PROOF !== "1")(
+    "discovers and invokes files.search through a live Weave MCP endpoint",
+    async () => {
+      const url = URL.parse(proofInput("WEAVER_MCP_PROOF_URL"));
+      if (
+        !url ||
+        url.pathname !== "/mcp" ||
+        url.search ||
+        url.hash ||
+        url.username ||
+        url.password ||
+        (url.protocol !== "https:" &&
+          !(url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)))
+      ) {
+        throw new Error("WEAVER_MCP_PROOF_URL must be HTTPS /mcp or loopback HTTP /mcp");
+      }
+      const query = proofInput("WEAVER_MCP_PROOF_FILE_QUERY");
+      const expectedId = proofInput("WEAVER_MCP_PROOF_EXPECTED_FILE_ID");
+      const expectedName = proofInput("WEAVER_MCP_PROOF_EXPECTED_FILE_NAME");
+      const token = await proofWorkloadToken();
+      const workspaceDir = await mkdtemp(join(tmpdir(), "weaver-live-mcp-"));
+      try {
+        const runtime = createSessionMcpRuntime({
+          sessionId: `weaver-live-${randomUUID()}`,
+          workspaceDir,
+          manifestRegistry: { plugins: [] },
+          cfg: {
+            plugins: { enabled: false },
+            mcp: {
+              servers: {
+                weave: {
+                  url: url.href,
+                  transport: "streamable-http",
+                  headers: { Authorization: `Bearer ${token}` },
+                },
+              },
+            },
+          },
+        });
+        try {
+          const catalog = await runtime.getCatalog();
+          expect(catalog.tools.map((tool) => [tool.serverName, tool.toolName])).toContainEqual([
+            "weave",
+            "files.search",
+          ]);
+          const result = await runtime.callTool("weave", "files.search", { query, limit: 10 });
+          expect(result.isError).not.toBe(true);
+          const payloads: unknown[] = [result.structuredContent];
+          for (const part of result.content) {
+            if (part.type === "text") {
+              try {
+                payloads.push(JSON.parse(part.text) as unknown);
+              } catch {
+                // Non-JSON text is not a Files search result.
+              }
+            }
+          }
+          const matches = payloads.flatMap(proofMatches);
+          expect(matches).toContainEqual(
+            expect.objectContaining({ canonicalFileId: expectedId, name: expectedName }),
+          );
+        } finally {
+          await runtime.dispose();
+        }
+      } finally {
+        await rm(workspaceDir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 });
