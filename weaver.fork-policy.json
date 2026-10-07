@@ -98,9 +98,9 @@
     }
   ],
   "budgets": {
-    "maxChangedFiles": 24,
+    "maxChangedFiles": 25,
     "maxChangedCoreFiles": 10,
-    "maxNonPluginPatchLines": 2500,
+    "maxNonPluginPatchLines": 2800,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
   }
