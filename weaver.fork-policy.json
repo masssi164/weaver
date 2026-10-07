@@ -25,10 +25,81 @@
     "weaver.fork-policy.json"
   ],
   "approvedPlugins": [],
-  "approvedCorePatches": [],
+  "approvedCorePatches": [
+    {
+      "path": ".github/security-review-policy.yml",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/152415",
+      "removalCriterion": "Remove when the fork's trusted security-review policy no longer inherits an upstream-repository rollout PR coordinate.",
+      "maxPatchLines": 3
+    },
+    {
+      "path": "test/scripts/security-review-rollout.test.ts",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/152415",
+      "removalCriterion": "Remove with the fork-local security-review policy exception after upstream rollout coordinates cease to be inherited.",
+      "maxPatchLines": 9
+    },
+    {
+      "path": "extensions/browser/package.json",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
+      "removalCriterion": "Remove when the next signed upstream release includes the patched MCP SDK dependency.",
+      "maxPatchLines": 2
+    },
+    {
+      "path": "extensions/qa-lab/package.json",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
+      "removalCriterion": "Remove when the next signed upstream release includes the patched MCP SDK dependency.",
+      "maxPatchLines": 2
+    },
+    {
+      "path": "package.json",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
+      "removalCriterion": "Remove when the next signed upstream release includes the patched MCP SDK dependency.",
+      "maxPatchLines": 2
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
+      "removalCriterion": "Remove when the next signed upstream release includes the audited dependency lockfile.",
+      "maxPatchLines": 115
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/165902",
+      "removalCriterion": "Remove when the next signed upstream release includes the patched source-map-js override.",
+      "maxPatchLines": 1
+    },
+    {
+      "path": "src/agents/mcp-oauth-provider.ts",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
+      "removalCriterion": "Remove when the next signed upstream release includes the MCP OAuth issuer fix.",
+      "maxPatchLines": 25
+    },
+    {
+      "path": "src/agents/mcp-oauth-refresh-issuer.test.ts",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
+      "removalCriterion": "Remove when the next signed upstream release includes the MCP OAuth issuer regression tests.",
+      "maxPatchLines": 97
+    },
+    {
+      "path": "ui/package.json",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
+      "removalCriterion": "Remove when the next signed upstream release includes the patched MCP client and core dependencies.",
+      "maxPatchLines": 4
+    }
+  ],
   "budgets": {
-    "maxChangedFiles": 15,
-    "maxChangedCoreFiles": 0,
+    "maxChangedFiles": 24,
+    "maxChangedCoreFiles": 10,
     "maxNonPluginPatchLines": 2500,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
