@@ -54,8 +54,8 @@ The focused Vitest configuration runs the complete Weaver seam suite. It neither
 The suite exercises OpenClaw's session MCP client against an isolated loopback endpoint for tool discovery and invocation, checks that operator and Matrix requester OAuth state keys remain separate, and rejects requester-only tools in an operator session. This verifies the client seam only. Live Weave API authorization and the managed-cell workload flow still require integrated validation before MCP can be enabled.
 
 For an isolated live Weave MCP proof, provision a disposable server, a dedicated entitled cell
-workload, and a Files fixture visible to its bound member. Mint a short-lived MCP-audience access
-token for that cell into an owner-only file outside the repository. Set the following proof inputs
+workload, and Files and Calendar fixtures visible to its bound member. Mint a short-lived MCP-audience access
+token with `mcp.tools`, `files.read`, and `calendar.read` into an owner-only file outside the repository. Set the following proof inputs
 and run the separate live suite:
 
 ```bash
@@ -64,12 +64,16 @@ export WEAVER_MCP_PROOF_TOKEN_FILE=/absolute/private/path/cell-mcp-token
 export WEAVER_MCP_PROOF_FILE_QUERY='Roadmap'
 export WEAVER_MCP_PROOF_EXPECTED_FILE_ID='file:stable-reference'
 export WEAVER_MCP_PROOF_EXPECTED_FILE_NAME='Roadmap'
+export WEAVER_MCP_PROOF_EXPECTED_FILE_CONTENT='Synthetic roadmap fixture'
+export WEAVER_MCP_PROOF_CALENDAR_ID='calendar:stable-reference'
+export WEAVER_MCP_PROOF_EVENT_ID='event:stable-reference'
+export WEAVER_MCP_PROOF_EVENT_TITLE='Synthetic calendar fixture'
 WEAVER_MCP_LIVE_PROOF=1 pnpm exec vitest run \
   --config scripts/weaver/vitest.config.mjs -t 'live Weave MCP'
 ```
 
-The proof uses OpenClaw's real session MCP client and fails if discovery, invocation, or the
-expected stable Files reference fails. It reads the token only in the test process and does not
+The proof uses OpenClaw's real session MCP client and fails if discovery, invocation, Files
+resource readback, or the expected Calendar event fails. It reads the token only in the test process and does not
 persist it in OpenClaw config or artifacts. For local HTTPS, trust the disposable stack's CA with
 Node's `NODE_EXTRA_CA_CERTS`. This one-shot test does not supply the managed client-credentials
 refresh path, current authorization negatives, or product activation evidence.

@@ -154,10 +154,11 @@ describe("Weaver MCP client journey", () => {
     expect(aliceFirstSession.storeKey).toBe(aliceSecondSession.storeKey);
     expect(aliceFirstSession.storeKey).not.toBe(bobSession.storeKey);
     expect(aliceFirstSession.storeKey).not.toBe(operator.storeKey);
-    expect(
-      requesterMcpOAuthIdentity(serverName, serverUrl, { ...alice, agentAccountId: "other" })
-        .storeKey,
-    ).not.toBe(aliceFirstSession.storeKey);
+    const otherAgent = requesterMcpOAuthIdentity(serverName, serverUrl, {
+      ...alice,
+      agentAccountId: "other",
+    });
+    expect(otherAgent.storeKey).not.toBe(aliceFirstSession.storeKey);
   });
 
   it("does not expose requester OAuth tools through an operator session", async () => {
@@ -192,7 +193,7 @@ describe("Weaver MCP client journey", () => {
   });
 
   it.skipIf(process.env.WEAVER_MCP_LIVE_PROOF !== "1")(
-    "discovers and invokes files.search through a live Weave MCP endpoint",
+    "uses the live Weave MCP Files resource and Calendar agenda through OpenClaw",
     async () => {
       const url = URL.parse(proofInput("WEAVER_MCP_PROOF_URL"));
       if (
@@ -210,6 +211,10 @@ describe("Weaver MCP client journey", () => {
       const query = proofInput("WEAVER_MCP_PROOF_FILE_QUERY");
       const expectedId = proofInput("WEAVER_MCP_PROOF_EXPECTED_FILE_ID");
       const expectedName = proofInput("WEAVER_MCP_PROOF_EXPECTED_FILE_NAME");
+      const expectedContent = proofInput("WEAVER_MCP_PROOF_EXPECTED_FILE_CONTENT");
+      const calendarId = proofInput("WEAVER_MCP_PROOF_CALENDAR_ID");
+      const eventId = proofInput("WEAVER_MCP_PROOF_EVENT_ID");
+      const eventTitle = proofInput("WEAVER_MCP_PROOF_EVENT_TITLE");
       const token = await proofWorkloadToken();
       const workspaceDir = await mkdtemp(join(tmpdir(), "weaver-live-mcp-"));
       try {
@@ -232,10 +237,9 @@ describe("Weaver MCP client journey", () => {
         });
         try {
           const catalog = await runtime.getCatalog();
-          expect(catalog.tools.map((tool) => [tool.serverName, tool.toolName])).toContainEqual([
-            "weave",
-            "files.search",
-          ]);
+          expect(catalog.tools.map((tool) => tool.toolName)).toEqual(
+            expect.arrayContaining(["files.search", "calendar.agenda"]),
+          );
           const result = await runtime.callTool("weave", "files.search", { query, limit: 10 });
           expect(result.isError).not.toBe(true);
           const payloads: unknown[] = [result.structuredContent];
@@ -249,9 +253,26 @@ describe("Weaver MCP client journey", () => {
             }
           }
           const matches = payloads.flatMap(proofMatches);
-          expect(matches).toContainEqual(
-            expect.objectContaining({ canonicalFileId: expectedId, name: expectedName }),
-          );
+          const match = matches.find(
+            (item) => (item as Record<string, unknown> | null)?.canonicalFileId === expectedId,
+          ) as Record<string, unknown> | undefined;
+          expect(match).toMatchObject({ canonicalFileId: expectedId, name: expectedName });
+          const uri = match?.resourceUri;
+          expect(uri).toBeTypeOf("string");
+          expect(await runtime.readResource("weave", uri as string)).toMatchObject({
+            contents: [expect.objectContaining({ uri, text: expectedContent })],
+          });
+          const agenda = await runtime.callTool("weave", "calendar.agenda", {
+            calendarId,
+            from: "2026-10-23T00:00:00Z",
+            to: "2026-10-29T00:00:00Z",
+            evaluationTimeZone: "Europe/Berlin",
+          });
+          expect(agenda.isError).not.toBe(true);
+          const calendarResult = JSON.stringify(agenda.structuredContent ?? agenda.content);
+          for (const expected of [calendarId, eventId, eventTitle]) {
+            expect(calendarResult).toContain(expected);
+          }
         } finally {
           await runtime.dispose();
         }
