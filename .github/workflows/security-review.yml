@@ -9,7 +9,7 @@ on:
     workflows: [CI]
     types: [completed]
   schedule:
-    - cron: "4-59/10 * * * *" # reconcile CI completions whose workflow_run delivery was lost
+    - cron: "17 3 * * *" # daily fallback to reconcile CI completions whose workflow_run delivery was lost
 
 permissions:
   contents: read
