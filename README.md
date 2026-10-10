@@ -8,7 +8,7 @@ Weaver is an optional, upstream-first [OpenClaw](https://github.com/openclaw/ope
 
 [How it fits](#how-weave-and-weaver-fit-together) · [Development](#develop-and-verify) · [Operations](docs/weaver/operations.md) · [Upstream provenance](UPSTREAM.md)
 
-> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Managed MCP, live Weave integration, Matrix recovery, and external cell-state restoration are unverified. A successful build is not a production-readiness claim.
+> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Weave's exact-head integration suite has exercised the pinned OpenClaw client against its Matrix and Files/Calendar MCP boundaries. Managed Weaver cells, Matrix recovery, and external cell-state restoration remain unverified. A successful build is not a production-readiness claim.
 
 ## How Weave and Weaver fit together
 
@@ -29,7 +29,7 @@ The distribution is based on signed **OpenClaw v2026.9.8**. [UPSTREAM.md](UPSTRE
 
 The managed startup guard verifies the projector's response against the exact profile bytes and cell binding. It rejects literal credentials, additional channels, unsafe paths, and missing verification, then launches the stock OpenClaw gateway with explicit configuration and state paths.
 
-**Managed MCP is still disabled.** The Weave-side Files/Calendar MCP contract is separate from the Matrix conversational channel. The complete workload-authorization integration must be proven before MCP is enabled in Weaver cells. There is no shared-token, static-header, or human-OAuth fallback.
+**Managed MCP is still disabled in Weaver cells.** The Weave-side Files/Calendar MCP contract is separate from the Matrix conversational channel. Weave's [exact-head Full Compose E2E](https://github.com/masssi164/weave/actions/runs/38062852255) at `7e3cbb7a1f338fbb45ee6742198720412f2ee4b4` used OpenClaw `2026.9.8` to discover and invoke Files and Calendar tools, including authorized Calendar writes, stale-version denial, and a denied member write. That proves the stock client integration in a disposable Weave environment; it does not activate or qualify the broader managed-cell runtime. Managed cells still require their own current workload-authorization proof. There is no shared-token, static-header, or human-OAuth fallback.
 
 Cross-node reconstruction, isolation, Matrix E2EE recovery, workload authorization, backup/restore, accessibility, and chaos evidence remain unverified for a managed Weaver deployment. Broad cell orchestration, private Runners, workflows, and context graphs are outside the current Weave release. See the [deferred architecture](docs/weaver/architecture.md) and [upstream review scope](docs/weaver/upstream-review.md).
 
