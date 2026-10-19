@@ -8,7 +8,7 @@ Weaver is an optional, upstream-first [OpenClaw](https://github.com/openclaw/ope
 
 [How it fits](#how-weave-and-weaver-fit-together) · [Development](#develop-and-verify) · [Operations](docs/weaver/operations.md) · [Upstream provenance](UPSTREAM.md)
 
-> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Weave's exact-head integration suite has exercised the pinned OpenClaw client against its Matrix and Files/Calendar MCP boundaries. Managed Weaver cells, Matrix recovery, and external cell-state restoration remain unverified. A successful build is not a production-readiness claim.
+> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Weave's recorded earlier-source integration suite exercised OpenClaw `2026.9.8` against its Matrix and Files/Calendar MCP boundaries. Admission and live compatibility for this `2026.10.5` distribution remain pending. Managed Weaver cells, Matrix recovery, and external cell-state restoration remain unverified. A successful build is not a production-readiness claim.
 
 ## How Weave and Weaver fit together
 
@@ -19,13 +19,13 @@ The design is **the member's rights, within organization-approved capabilities**
 - **Weave server (approved contract):** product APIs, current member and resource authorization, and provider-backed Files and Calendar operations. Server code is the source for separate User and Admin OpenAPI artifacts and generated product HTTP clients.
 - **Weave Flutter:** native Rust/Matrix SDK chat, with Weave-owned stable room associations.
 - **OpenClaw/Weaver:** the agent loop, official Matrix plugin, sessions, skills, memory, MCP client, and native approvals. Matrix chat does not move behind a proprietary Weave REST API.
-- **Weaver layer:** the small, optional startup and distribution boundary around unchanged upstream runtime code.
+- **Weaver layer:** the small, optional startup and distribution boundary around the pinned upstream runtime.
 
 Keycloak is the self-hosted default identity provider; Weave supports OIDC/OAuth identity boundaries without making Keycloak the permanent product boundary. The Weave API, Matrix, and any future Weaver workload use appropriately separated audiences and sessions. A signed RuntimeProfile or OpenClaw approval is not, by itself, permission for a domain side effect.
 
 ## What is available now
 
-The distribution is based on signed **OpenClaw v2026.9.8**. [UPSTREAM.md](UPSTREAM.md) records the pinned commit, provenance, and upgrade procedure; upstream runtime code, dependency manifests, lockfiles, and licence notices remain unchanged.
+The distribution is based on signed **OpenClaw v2026.10.5**. [UPSTREAM.md](UPSTREAM.md) records the pinned baseline and upgrade procedure. Any downstream patch exceptions are declared in [`approvedCorePatches`](weaver.fork-policy.json), with upstream references, removal criteria, and line budgets; upstream licence notices remain intact.
 
 The managed startup guard verifies the projector's response against the exact profile bytes and cell binding. It rejects literal credentials, additional channels, unsafe paths, and missing verification, then launches the stock OpenClaw gateway with explicit configuration and state paths.
 
@@ -78,7 +78,7 @@ persist it in OpenClaw config or artifacts. For local HTTPS, trust the disposabl
 Node's `NODE_EXTRA_CA_CERTS`. This one-shot test does not supply the managed client-credentials
 refresh path, current authorization negatives, or product activation evidence.
 
-The former downstream package-script aliases are intentionally absent. The direct commands above keep OpenClaw's package metadata and lockfiles byte-identical to upstream.
+The former downstream package-script aliases are intentionally absent. Runtime, package metadata, and lockfile differences are limited to the exceptions declared in [`approvedCorePatches`](weaver.fork-policy.json).
 
 ## RuntimeProfile guard interface
 

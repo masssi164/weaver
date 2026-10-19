@@ -78,15 +78,14 @@ export async function prepareSqliteTargetFromSessionStorePath(
   signal?: AbortSignal,
 ): Promise<ResolvedSqliteStoreTarget> {
   signal?.throwIfAborted();
-  const pathname = path.resolve(storePath);
-  const unsuffixed = resolveUnsuffixedSqliteTargetFromSessionStorePath(pathname);
+  const unsuffixed = resolveUnsuffixedSqliteTargetFromSessionStorePath(storePath);
   if (unsuffixed.agentId) {
     return unsuffixed;
   }
   const env = captureSessionTranscriptStorageEnvironment(options.env ?? process.env);
   const registryRead = prepareOpenClawAgentDatabaseRegistrySnapshotRead({ env });
   const input = {
-    storePath: pathname,
+    storePath: path.resolve(storePath.trim()),
     agentId: options.agentId,
     defaultAgentId: options.defaultAgentId,
     env,
@@ -130,18 +129,27 @@ export async function prepareSqliteTargetFromSessionStorePath(
   }
 }
 
-function resolveRegisteredOwners(
+function resolvePersistedOwners(
   pathname: string,
   registeredDatabases: readonly Pick<OpenClawRegisteredAgentDatabase, "agentId" | "path">[],
   isSameDatabasePath: (left: string, right: string) => boolean,
-): string[] {
-  return [
+  options: Pick<ResolveSqliteStoreTargetOptions, "readCandidates" | "onReadError">,
+) {
+  const registeredOwners = [
     ...new Set(
       registeredDatabases
         .filter((entry) => isSameDatabasePath(entry.path, pathname))
         .map((entry) => normalizeAgentId(entry.agentId)),
     ),
   ];
+  let databaseOwner: string | undefined;
+  if (registeredOwners.length === 1) {
+    // Registry precedence makes inspection redundant, but filesystem errors still propagate.
+    hasFilesystemEntry(pathname, options.onReadError);
+  } else {
+    databaseOwner = resolveDatabaseOwner(pathname, options.readCandidates, options.onReadError);
+  }
+  return { registeredOwners, databaseOwner };
 }
 
 function resolveDatabaseOwner(
@@ -189,22 +197,12 @@ function resolveCustomStoreSqlitePath(params: {
   const isSameDatabasePath =
     params.options.isSameDatabasePath ?? createOpenClawAgentDatabasePathMatcher();
   const resolvePersistedOwner = (candidatePath: string) => {
-    const registeredOwners = resolveRegisteredOwners(
+    const { registeredOwners, databaseOwner } = resolvePersistedOwners(
       candidatePath,
       registeredDatabases,
       isSameDatabasePath,
+      params.options,
     );
-    let databaseOwner: string | undefined;
-    if (registeredOwners.length === 1) {
-      // Registry precedence makes inspection redundant, but filesystem errors still propagate.
-      hasFilesystemEntry(candidatePath, params.options.onReadError);
-    } else {
-      databaseOwner = resolveDatabaseOwner(
-        candidatePath,
-        params.options.readCandidates,
-        params.options.onReadError,
-      );
-    }
     return {
       effectiveOwner:
         registeredOwners.length === 1
@@ -353,22 +351,12 @@ export function resolveSqliteTargetFromSessionStorePath(
       options.env,
       options.onReadError,
     );
-    const registeredOwners = resolveRegisteredOwners(
+    const { registeredOwners, databaseOwner } = resolvePersistedOwners(
       unsuffixedTarget.path,
       registeredDatabases,
       options.isSameDatabasePath ?? createOpenClawAgentDatabasePathMatcher(),
+      options,
     );
-    let databaseOwner: string | undefined;
-    if (registeredOwners.length === 1) {
-      // Registry precedence makes inspection redundant, but filesystem errors still propagate.
-      hasFilesystemEntry(unsuffixedTarget.path, options.onReadError);
-    } else {
-      databaseOwner = resolveDatabaseOwner(
-        unsuffixedTarget.path,
-        options.readCandidates,
-        options.onReadError,
-      );
-    }
     const configuredDefaultAgentId = normalizeAgentId(
       options.defaultAgentId ?? LEGACY_IMPLICIT_AGENT_ID,
     );
