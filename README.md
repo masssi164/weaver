@@ -8,7 +8,7 @@ Weaver is an optional, upstream-first [OpenClaw](https://github.com/openclaw/ope
 
 [How it fits](#how-weave-and-weaver-fit-together) · [Development](#develop-and-verify) · [Operations](docs/weaver/operations.md) · [Upstream provenance](UPSTREAM.md)
 
-> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Weave's exact-head integration suite has exercised the pinned OpenClaw client against its Matrix and Files/Calendar MCP boundaries. Managed Weaver cells, Matrix recovery, and external cell-state restoration remain unverified. A successful build is not a production-readiness claim.
+> **In development:** the RuntimeProfile startup guard and distribution checks are executable. Weave's recorded earlier-source integration suite exercised OpenClaw `2026.9.8` against its Matrix and Files/Calendar MCP boundaries. Admission and live compatibility for this `2026.10.5` distribution remain pending. Managed Weaver cells, Matrix recovery, and external cell-state restoration remain unverified. A successful build is not a production-readiness claim.
 
 ## How Weave and Weaver fit together
 
@@ -25,7 +25,7 @@ Keycloak is the self-hosted default identity provider; Weave supports OIDC/OAuth
 
 ## What is available now
 
-The distribution is based on signed **OpenClaw v2026.9.8**. [UPSTREAM.md](UPSTREAM.md) records the pinned baseline and upgrade procedure. Narrow runtime, dependency, and security-review patches are declared in [`approvedCorePatches`](weaver.fork-policy.json), with upstream references, removal criteria, and line budgets; upstream licence notices remain intact.
+The distribution is based on signed **OpenClaw v2026.10.5**. [UPSTREAM.md](UPSTREAM.md) records the pinned baseline and upgrade procedure. Any downstream patch exceptions are declared in [`approvedCorePatches`](weaver.fork-policy.json), with upstream references, removal criteria, and line budgets; upstream licence notices remain intact.
 
 The managed startup guard verifies the projector's response against the exact profile bytes and cell binding. It rejects literal credentials, additional channels, unsafe paths, and missing verification, then launches the stock OpenClaw gateway with explicit configuration and state paths.
 

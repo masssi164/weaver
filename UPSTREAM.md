@@ -5,11 +5,11 @@ Weaver is a thin governed distribution, not a reimplementation of OpenClaw.
 ## Exact candidate baseline
 
 - Repository: https://github.com/openclaw/openclaw
-- Stable release: `v2026.9.8`
-- Published: `2026-10-03T03:21:47Z`
-- Annotated tag object: `b1c1c6d3af1f68bc82efbb6c92fb224c36df8683`
-- Peeled commit: `fc23bc864e4553c2d215e479eeec47b67a0bf943`
-- Source tree: `92e461befd359758be6e2abde8ba80df2544653e`
+- Stable release: `v2026.10.5`
+- Published: `2026-10-18T21:47:25Z`
+- Annotated tag object: `9171d0a427738902efd811c648325cf54116743c`
+- Peeled commit: `1b58cb9a1b4f4353e1add63c8506db4d890962e8`
+- Source tree: `a138559698570e238395121723a773106ac33f8c`
 - GitHub tag-signature verification: `verified=true`, `reason=valid`
 - Upstream licence: MIT, with incorporated third-party notices retained.
 
@@ -31,20 +31,17 @@ an independent requirement even if upstream now offers more authentication capab
 
 ## Review and verification
 
-The October 3 review covers the signed stable release metadata, current toolchain requirements,
-changed baseline, unchanged distribution guard, and the recovery/update changes documented in
-`CHANGELOG/2026.9.8.md`. It is not a claim that every upstream change since July was individually
-audited or that a production cell was migrated.
-
-Admission requires current GitHub execution evidence for signature verification, fork bounds,
-the complete Weaver seam suite, production dependency audit and the upstream build. A date or
-upstream release alone is not sufficient evidence. See [Review scope](docs/weaver/upstream-review.md).
+The new signed baseline includes the earlier MCP issuer and dependency fixes, so their eight
+patch exceptions are removed. Only the two declared fork-local security-review rollout exceptions
+remain. The actual October 19 source review and historical October 3 review are recorded separately;
+hosted distribution validation is pending. No currentness or runtime admission is claimed
+until those existing gates pass.
 
 ## Upgrade and rollback
 
 1. Discover a published stable release and verify its exact annotated tag, peeled commit and provenance.
 2. Start from the new upstream tree; reapply only owned distribution files and refresh their documentation.
-3. Preserve the zero-core-patch rule and review all changed paths against the fork budget.
+3. Reassess approved exceptions against their removal criteria and review all changed paths against the fork budgets.
 4. Install the upstream lockfile and execute distribution, dependency and build checks.
 5. Require live Matrix and current Weave integration evidence for the chosen deployment. If the optional
    managed-cell design is used, also require its control-plane and reconstruction evidence.

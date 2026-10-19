@@ -1,4 +1,5 @@
 // WhatsApp monitor inbox behavior split by ownership.
+import { WAMessageStubType } from "baileys";
 import { observeChannelIngressQueueWrite } from "openclaw/plugin-sdk/channel-ingress-test-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -363,6 +364,35 @@ describe("web monitor inbox delivery and dedupe", () => {
     await listener.close();
   });
 
+  it("delivery coordinator delivers a decrypted message after its ciphertext stub", async () => {
+    const onMessage = vi.fn(async () => undefined);
+    const { listener, sock } = await startInboxMonitor(onMessage as InboxOnMessage);
+    const messageId = nextMessageId("ciphertext-stub");
+    const upsert = dmUpsert(messageId, "decrypted");
+
+    sock.ev.emit("messages.upsert", {
+      type: "notify",
+      messages: [
+        {
+          key: { id: messageId, fromMe: false, remoteJid: "999@s.whatsapp.net" },
+          messageStubType: WAMessageStubType.CIPHERTEXT,
+          messageTimestamp: 1_700_000_000,
+        },
+      ],
+    });
+    await settleInboundWork();
+
+    sock.ev.emit("messages.upsert", upsert);
+    await waitForMessageCalls(onMessage, 1);
+
+    sock.ev.emit("messages.upsert", upsert);
+    await settleInboundWork();
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(inboundMessage(onMessage).payload.body).toBe("decrypted");
+    await listener.close();
+  });
+
   it("delivery coordinator lets a later same-key flush steer during an active turn", async () => {
     let releaseFirst: (() => void) | undefined;
     const firstTurn = new Promise<void>((resolve) => {
@@ -579,9 +609,9 @@ describe("web monitor inbox delivery and dedupe", () => {
     expect(sock.end).toHaveBeenCalledTimes(1);
   });
 
-  it("delivery coordinator drains serialized same-lane replies before socket close", async () => {
-    vi.useFakeTimers();
-    try {
+  it("delivery coordinator drains serialized same-lane replies before socket close", () =>
+    withRetryClock(async () => {
+      const firstBuffered = createDeferred<void>();
       let releaseFirst: (() => void) | undefined;
       const firstTurn = new Promise<void>((resolve) => {
         releaseFirst = resolve;
@@ -595,8 +625,14 @@ describe("web monitor inbox delivery and dedupe", () => {
       });
       const { listener, sock } = await startInboxMonitor(onMessage as InboxOnMessage, {
         debounceMs: 50,
+        shouldDebounce: () => {
+          firstBuffered.resolve();
+          return true;
+        },
       });
       sock.ev.emit("messages.upsert", dmUpsert(nextMessageId("debounce-close-reply-1"), "first"));
+      // Durable admission can complete after the virtual clock has already advanced.
+      await firstBuffered.promise;
       await vi.advanceTimersByTimeAsync(50);
       await waitForMessageCalls(onMessage, 1);
       expect(inboundMessage(onMessage).payload.body).toBe("first");
@@ -630,10 +666,7 @@ describe("web monitor inbox delivery and dedupe", () => {
       expect(sock.sendMessage.mock.invocationCallOrder.at(-1)).toBeLessThan(
         sock.end.mock.invocationCallOrder.at(0),
       );
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+    }));
 
   it("delivery coordinator waits for in-flight handlers before close drain", async () => {
     let releaseHandler: (() => void) | undefined;

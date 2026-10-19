@@ -46,7 +46,7 @@ rather than relays, the workload token for a narrower backend token. The service
 becomes the member. Public-client, generic service-account, shared-client and human bearer tokens
 have no MCP path.
 
-**MCP remains disabled in this distribution.** The v2026.9.8 upstream update does not establish the
+**MCP remains disabled in this distribution.** An upstream baseline update does not establish the
 ARC binding and authorization proof. Interactive OAuth, static headers and fork-local credential
 shims are not substitutes. This restriction is not a claim about the current upstream feature set.
 
