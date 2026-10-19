@@ -13,18 +13,18 @@ Weaver is a thin governed distribution, not a reimplementation of OpenClaw.
 - GitHub tag-signature verification: `verified=true`, `reason=valid`
 - Upstream licence: MIT, with incorporated third-party notices retained.
 
-The candidate tree starts from this upstream tree and reapplies only the declared Weaver-owned
-files. It does not reuse the July runtime, dependency manifest, lockfile or generated upstream docs.
+The candidate tree starts from this upstream tree and adds the declared Weaver-owned layer and
+`approvedCorePatches` in `weaver.fork-policy.json`. It does not reuse the July baseline.
 
 ## Preserved boundaries
 
-The agent loop, models, official Matrix plugin, MCP client, sessions, native approvals, skills,
-memory, CLI, gateway and upstream security fixes come from the pinned release without core patches.
-The RuntimeProfile guard and all six existing Weaver seam tests are retained unchanged.
+The runtime comes from the pinned release with only the explicitly approved downstream patches.
+Each exception records its upstream reference, removal criterion, and line budget in the fork policy.
+The RuntimeProfile guard, Weaver seam tests, and upstream licence notices remain in place.
 
 The three downstream root package-script aliases are removed. Use the direct equivalents in
 README and the operations guide. `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, runtime
-sources and upstream notices must match the pinned release exactly.
+sources must match the pinned release except for those declared patches. Upstream notices remain intact.
 
 No managed MCP capability is activated. Its current-domain/workload authorization proof remains
 an independent requirement even if upstream now offers more authentication capabilities.
