@@ -55,12 +55,14 @@ jobs:
       - name: Enforce the thin-fork boundary
         run: node scripts/weaver/check-fork-boundary.mjs
 
-      - name: Verify untouched upstream runtime and dependency inputs
+      - name: Verify protected upstream inputs
         shell: bash
         run: |
           set -euo pipefail
           commit="$(node -p "JSON.parse(require('node:fs').readFileSync('weaver.fork-policy.json')).upstream.commit")"
-          git diff --exit-code "${commit}" HEAD -- src extensions packages package.json pnpm-lock.yaml pnpm-workspace.yaml LICENSE THIRD_PARTY_NOTICES.md
+          # The preceding fork boundary check requires an exact path, upstream PR,
+          # removal criterion, and line budget for every runtime/dependency patch.
+          git diff --exit-code "${commit}" HEAD -- packages LICENSE THIRD_PARTY_NOTICES.md
           git diff --check "${commit}" HEAD
 
       - name: Install the locked upstream dependencies

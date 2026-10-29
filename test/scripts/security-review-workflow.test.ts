@@ -359,12 +359,11 @@ describe("security review workflow trust boundaries", () => {
     },
   );
 
-  it("uses PR, command, revocation, CI completion, and reconciliation events", () => {
+  it("uses PR, command, revocation, and CI completion events without scheduled reruns", () => {
     const workflow = readWorkflow("security-review");
     expect(Object.keys(workflow.on).toSorted()).toEqual([
       "issue_comment",
       "pull_request_target",
-      "schedule",
       "workflow_run",
     ]);
     expect(workflow.on.pull_request_target?.types).toEqual(
@@ -379,7 +378,7 @@ describe("security review workflow trust boundaries", () => {
     );
     expect(workflow.on.issue_comment?.types).toEqual(["created", "edited", "deleted"]);
     expect(workflow.on.workflow_run).toEqual({ workflows: ["CI"], types: ["completed"] });
-    expect(workflow.on.schedule).toEqual([{ cron: "4-59/10 * * * *" }]);
+    expect(workflow.on.schedule).toBeUndefined();
     const concurrency = workflow.jobs.resolve!.concurrency!;
     expect(concurrency["cancel-in-progress"]).toBe(false);
     const group = concurrency.group.replace(/^\$\{\{|\}\}$/gu, "");
@@ -427,7 +426,6 @@ describe("security review workflow trust boundaries", () => {
         allowed: true,
       },
       { eventName: "pull_request_target", action: "edited", changes: {}, allowed: true },
-      { eventName: "schedule", allowed: true },
       { eventName: "workflow_run", sourceEvent: "pull_request", allowed: true },
       { eventName: "workflow_run", sourceEvent: "push", allowed: false },
       { eventName: "workflow_run", sourceEvent: "workflow_dispatch", allowed: true },

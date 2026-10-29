@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -112,6 +112,11 @@ try {
 }
 
 describe("security review rollout", () => {
+  it("enforces the fork policy without looking up an upstream rollout PR", () => {
+    const policy = parse(readFileSync(".github/security-review-policy.yml", "utf8"));
+    expect(policy.rollout).toBeUndefined();
+  });
+
   it("enforces without GitHub rollout lookups after the configuration is removed", () => {
     expect(evaluate({ policy: { rollout: undefined } })).toEqual({
       status: 0,
