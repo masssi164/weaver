@@ -41,6 +41,20 @@
       "maxPatchLines": 9
     },
     {
+      "path": ".github/workflows/security-review.yml",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/155392",
+      "removalCriterion": "Remove when the inherited Security Review workflow no longer schedules periodic reconciliation in forks.",
+      "maxPatchLines": 2
+    },
+    {
+      "path": "test/scripts/security-review-workflow.test.ts",
+      "owner": "Weaver maintainers",
+      "upstreamIssue": "https://github.com/openclaw/openclaw/pull/155392",
+      "removalCriterion": "Remove with the fork-local Security Review schedule exception when upstream supports event-driven-only review in forks.",
+      "maxPatchLines": 6
+    },
+    {
       "path": "extensions/browser/package.json",
       "owner": "Weaver maintainers",
       "upstreamIssue": "https://github.com/openclaw/openclaw/pull/166217",
@@ -98,9 +112,9 @@
     }
   ],
   "budgets": {
-    "maxChangedFiles": 25,
-    "maxChangedCoreFiles": 10,
-    "maxNonPluginPatchLines": 2800,
+    "maxChangedFiles": 27,
+    "maxChangedCoreFiles": 12,
+    "maxNonPluginPatchLines": 2815,
     "maxSecurityReleaseLagDays": 7,
     "maxSecurityReviewAgeDays": 14
   }
